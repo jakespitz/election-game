@@ -1,0 +1,1050 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><style>:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}body{margin:0;font:14px system-ui}img{max-width:100%}[hidden]{display:none!important}</style><script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script><script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script><script>// Standalone hosting: gives the game the same small storage interface it has inside Claude,
+// backed by Firestore, so players need only the link. No accounts, so a chosen tax rate
+// stays in the player's own browser until both candidates have locked in.
+(function () {
+  const FIREBASE_CONFIG = {"apiKey": "AIzaSyCp0RV5jpeI-BihlzKKki2Iuxi5VZGalSQ", "authDomain": "elections-game-3c72c.firebaseapp.com", "projectId": "elections-game-3c72c", "storageBucket": "elections-game-3c72c.firebasestorage.app", "messagingSenderId": "6678517702", "appId": "1:6678517702:web:d8e8cd42190cc77e3604c7"};
+  let store = null;
+  if (FIREBASE_CONFIG && window.firebase) {
+    firebase.initializeApp(FIREBASE_CONFIG);
+    const fs = firebase.firestore();
+    const wrapDoc = s => ({ id: s.id, exists: s.exists, data: () => s.data(), metadata: s.metadata });
+    const wrapCol = q => ({ docs: q.docs.map(wrapDoc), metadata: q.metadata });
+    const doc = path => {
+      const ref = fs.doc(path);
+      return {
+        get: () => ref.get().then(wrapDoc),
+        set: body => ref.set(body),
+        update: body => ref.set(body, { merge: true }) // Firestore's own update() would replace nested fields
+      };
+    };
+    const collection = path => {
+      const col = fs.collection(path);
+      return {
+        doc: id => doc(path + '/' + id),
+        get: () => col.get().then(wrapCol),
+        onSnapshot: (next, error) => col.onSnapshot(q => next(wrapCol(q)), error)
+      };
+    };
+    // Taking a seat is one atomic step, so two people can never both get it.
+    const claim = (path, body) => fs.runTransaction(async t => {
+      const ref = fs.doc(path), snap = await t.get(ref);
+      if (snap.exists && snap.data().owner) return false;
+      t.set(ref, body);
+      return true;
+    });
+    // Live updates are reliable here, so the backstop refresh can be rare. This keeps a class inside the free tier.
+    store = { doc, collection, claim, pollMs: 30000 };
+  }
+  window.claude = { use: async name => (name === 'db' ? store : null) };
+})();
+</script></head><body><title>The Tax Election</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,500..800&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+/* Layout: one screen at a time in a single column, sibling to Auction Design Lab. Candidate colours follow the seat, never a party. */
+:root {
+  --bg: #f1f4f4;
+  --surface: #fdfdfc;
+  --ink: #12161a;
+  --ink-2: #4a5358;
+  --muted: #6c757a;
+  --grid: #e1e5e6;
+  --axis: #c2c9cb;
+  --line: rgba(18, 22, 26, 0.11);
+  --accent: #0d6e62;
+  --accent-ink: #0b5c52;
+  --accent-wash: rgba(13, 110, 98, 0.09);
+  --on-accent: #ffffff;
+  --ca: #2a78d6;
+  --cb: #eb6834;
+  --ca-wash: rgba(42, 120, 214, 0.11);
+  --cb-wash: rgba(235, 104, 52, 0.12);
+  --r1: #8fd3c6; --r2: #bfe6de; --r3: #e4f3f0; --r4: transparent;
+  --good: #006300;
+  --bad: #b42f2f;
+  /* Voter tiles keep one lit look in both themes so the cartoons read the same */
+  --tile: #e6ecec;
+  --font-display: "Archivo", "Arial Narrow", system-ui, sans-serif;
+  --font-body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0e1213; --surface: #171c1e; --ink: #eef1f2; --ink-2: #c0c8cb; --muted: #8e979b;
+    --grid: #262c2f; --axis: #3b4347; --line: rgba(255, 255, 255, 0.10);
+    --accent: #1c8a79; --accent-ink: #6fd0bf; --accent-wash: rgba(44, 170, 150, 0.15); --on-accent: #ffffff;
+    --ca: #3987e5; --cb: #d95926; --ca-wash: rgba(57, 135, 229, 0.17); --cb-wash: rgba(217, 89, 38, 0.19);
+    --r1: #1c7a6b; --r2: #175c52; --r3: #143f39;
+    --good: #2fbf4f; --bad: #ef7b7b;
+    --tile: #dde4e4;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0e1213; --surface: #171c1e; --ink: #eef1f2; --ink-2: #c0c8cb; --muted: #8e979b;
+  --grid: #262c2f; --axis: #3b4347; --line: rgba(255, 255, 255, 0.10);
+  --accent: #1c8a79; --accent-ink: #6fd0bf; --accent-wash: rgba(44, 170, 150, 0.15); --on-accent: #ffffff;
+  --ca: #3987e5; --cb: #d95926; --ca-wash: rgba(57, 135, 229, 0.17); --cb-wash: rgba(217, 89, 38, 0.19);
+  --r1: #1c7a6b; --r2: #175c52; --r3: #143f39;
+  --good: #2fbf4f; --bad: #ef7b7b;
+  --tile: #dde4e4;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--ink); font-family: var(--font-body); font-size: 15px; line-height: 1.5; }
+.wrap { max-width: 900px; margin: 0 auto; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+h1, h2, h3 { text-wrap: balance; margin: 0; }
+p { margin: 0; }
+.num { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+button, input { font: inherit; color: inherit; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* Header */
+.top { background: var(--surface); border-bottom: 1px solid var(--line); }
+.head { padding-block: 22px 18px; display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 10px 24px; }
+.brand { display: grid; gap: 4px; }
+.eyebrow { font-family: var(--font-mono); font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+h1 { font-family: var(--font-display); font-stretch: 118%; font-weight: 800; font-size: clamp(28px, 5vw, 40px); line-height: 1.02; letter-spacing: -0.01em; }
+.gamebar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; font-size: 13px; color: var(--ink-2); }
+.gamebar b { font-family: var(--font-mono); font-weight: 500; color: var(--ink); letter-spacing: 0.06em; }
+.online { display: inline-flex; align-items: center; gap: 6px; }
+.online i { width: 8px; height: 8px; border-radius: 50%; background: var(--axis); }
+.online.on i { background: var(--good); }
+
+/* Screens */
+.flow { display: grid; gap: 20px; padding-block: 24px 56px; }
+.step { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 22px clamp(16px, 3vw, 28px) 24px; display: grid; gap: 18px; min-width: 0; }
+.step-h { display: grid; gap: 2px; }
+.stepno { font-family: var(--font-mono); font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--accent-ink); font-weight: 500; }
+.step h2 { font-family: var(--font-display); font-stretch: 114%; font-weight: 800; font-size: clamp(22px, 3.2vw, 28px); line-height: 1.1; }
+.step h3 { font-family: var(--font-display); font-stretch: 110%; font-weight: 700; font-size: 17px; }
+.lede { color: var(--ink-2); font-size: 16px; }
+.hint { font-size: 13px; color: var(--muted); line-height: 1.45; }
+.block { display: grid; gap: 10px; min-width: 0; }
+
+.field { display: grid; gap: 4px; min-width: 0; }
+.field label { font-size: 12px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-2); }
+input[type="text"] { width: 100%; padding: 9px 11px; border: 1px solid var(--axis); border-radius: 7px; background: var(--bg); font-size: 16px; } /* 16px stops phones zooming in on focus */
+#joinCode { font-family: var(--font-mono); letter-spacing: 0.14em; text-transform: uppercase; }
+.btn { border: 1px solid var(--axis); background: transparent; border-radius: 8px; padding: 8px 14px; font-size: 14px; font-weight: 500; cursor: pointer; }
+.btn:hover:not(:disabled) { background: var(--accent-wash); }
+.btn.primary { border: 0; background: var(--accent); color: var(--on-accent); font-family: var(--font-display); font-stretch: 110%; font-weight: 700; font-size: 15px; padding: 11px 18px; transition: filter .15s, transform .1s; }
+.btn.primary:hover:not(:disabled) { filter: brightness(1.08); background: var(--accent); }
+.btn.primary:active:not(:disabled) { transform: translateY(1px); }
+.btn.big { font-size: 17px; padding: 13px 22px; }
+.btn.sm { padding: 3px 10px; font-size: 12.5px; }
+.btn:disabled { opacity: .45; cursor: not-allowed; }
+
+/* Start */
+.voters { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+@media (max-width: 560px) { .voters { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.voter { display: flex; align-items: center; gap: 9px; min-width: 0; font-size: 13px; line-height: 1.25; }
+.voter b { display: block; font-weight: 500; }
+.voter span { color: var(--muted); font-family: var(--font-mono); font-size: 12px; }
+.pic { width: 44px; height: 44px; flex: none; background: var(--tile); border-radius: 9px; padding: 4px; }
+.paths { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+@media (max-width: 620px) { .paths { grid-template-columns: minmax(0, 1fr); } }
+.path { border: 1px solid var(--line); border-radius: 10px; padding: 14px; display: grid; gap: 10px; align-content: space-between; min-width: 0; }
+.msg { font-size: 14px; color: var(--bad); font-weight: 500; }
+.note { font-size: 14px; color: var(--ink-2); padding: 10px 12px; border-radius: 8px; background: var(--bg); }
+
+/* Lobby */
+.codebox { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; }
+.code { font-family: var(--font-mono); font-weight: 500; font-size: clamp(34px, 8vw, 46px); letter-spacing: 0.14em; line-height: 1; user-select: all; }
+.seats { display: grid; gap: 8px; }
+.seat { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 13px; border: 1px solid var(--line); border-radius: 8px; min-width: 0; }
+.seat .who { display: flex; align-items: center; gap: 9px; min-width: 0; overflow-wrap: anywhere; font-weight: 500; }
+.seat.empty .who { color: var(--muted); font-weight: 400; }
+.dot { width: 11px; height: 11px; border-radius: 50%; flex: none; display: inline-block; }
+.dot.a { background: var(--ca); } .dot.b { background: var(--cb); }
+.pill { font-size: 12px; font-weight: 600; padding: 2px 9px; border-radius: 99px; border: 1px solid var(--axis); color: var(--ink-2); white-space: nowrap; }
+.pill.go { color: var(--good); border-color: currentColor; }
+.you { font-weight: 400; color: var(--muted); font-size: 13px; }
+
+/* Electorate table */
+.tablewrap { overflow-x: auto; margin: 0 -4px; padding: 0 4px; }
+table { border-collapse: collapse; width: 100%; font-size: 13.5px; }
+th { text-align: left; font-size: 11px; letter-spacing: 0.05em; text-transform: uppercase; color: var(--muted); font-weight: 600; padding: 6px 8px; border-bottom: 1px solid var(--axis); vertical-align: bottom; white-space: nowrap; }
+td { padding: 7px 8px; border-bottom: 1px solid var(--grid); vertical-align: middle; }
+th.c, td.c { text-align: center; }
+th.r, td.r { text-align: right; }
+.gcell { display: flex; align-items: center; gap: 10px; min-width: 200px; }
+.gcell b { display: block; font-weight: 600; }
+.gcell small { display: block; font-size: 12.5px; line-height: 1.3; color: var(--muted); }
+.rank { font-family: var(--font-mono); font-size: 13px; width: 58px; }
+.rank.r1 { background: var(--r1); font-weight: 500; } .rank.r2 { background: var(--r2); } .rank.r3 { background: var(--r3); } .rank.r4 { background: var(--r4); color: var(--muted); }
+.colsel { box-shadow: inset 2px 0 0 var(--accent), inset -2px 0 0 var(--accent); }
+th.colsel { color: var(--accent-ink); box-shadow: none; }
+
+/* Tax choice */
+.taxes { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+@media (max-width: 620px) { .taxes { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.tax { position: relative; display: grid; gap: 2px; align-content: start; padding: 10px 12px 11px; border: 1px solid var(--line); border-radius: 9px; cursor: pointer; min-width: 0; transition: border-color .15s, background .15s; }
+.tax:hover { border-color: var(--axis); }
+.tax input { position: absolute; opacity: 0; pointer-events: none; }
+.tax b { font-family: var(--font-display); font-stretch: 112%; font-size: 32px; font-weight: 800; line-height: 1; }
+.tax small { font-size: 12.5px; line-height: 1.3; color: var(--ink-2); }
+.tax:has(input:checked) { border-color: var(--accent); background: var(--accent-wash); box-shadow: inset 0 0 0 1px var(--accent); }
+.tax:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; }
+.tax:has(input:disabled) { cursor: default; }
+.tax:has(input:disabled:not(:checked)) { opacity: .45; }
+.lockrow { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; }
+.status { font-size: 14px; color: var(--ink-2); }
+
+/* Game 2 type box */
+.typebox { border: 1px solid var(--accent); background: var(--accent-wash); border-radius: 10px; padding: 14px 16px; display: grid; gap: 10px; min-width: 0; }
+.typebox h3 { font-size: 19px; }
+.typebox table { max-width: 420px; }
+.typebox tr.mine td { font-weight: 600; }
+
+/* Election */
+.cands { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.cand { padding: 12px 14px; border-radius: 10px; border: 1px solid var(--line); display: grid; gap: 5px; min-width: 0; transition: box-shadow .3s; }
+.cand.won { box-shadow: inset 0 0 0 2px var(--ink); }
+.cand .nm { display: flex; align-items: center; gap: 8px; font-weight: 600; overflow-wrap: anywhere; min-width: 0; }
+.cand .tg { font-size: 12.5px; color: var(--muted); }
+.cand .ln { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.cand .tx { font-size: 14px; color: var(--ink-2); }
+.cand .tx b { font-family: var(--font-display); font-weight: 800; font-size: 24px; color: var(--ink); margin-left: 3px; }
+.cand .vt { font-family: var(--font-display); font-stretch: 108%; font-weight: 800; font-size: 34px; line-height: 1; }
+.vwrap { display: grid; gap: 4px; }
+.vbar { position: relative; height: 24px; background: var(--grid); border-radius: 6px; overflow: hidden; }
+.vfill { position: absolute; top: 0; bottom: 0; width: 0; transition: width .7s cubic-bezier(.2,.7,.3,1); }
+.vfill.a { left: 0; background: var(--ca); border-right: 2px solid var(--surface); }
+.vfill.b { right: 0; background: var(--cb); border-left: 2px solid var(--surface); }
+.half { position: absolute; left: 50%; top: 0; bottom: 0; width: 2px; margin-left: -1px; background: var(--ink); }
+.vscale { text-align: center; font-size: 12px; color: var(--muted); }
+.groups { display: grid; gap: 8px; }
+.grow { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 12px; padding: 8px 12px 8px 8px; border: 1px solid var(--line); border-radius: 9px; transition: background .3s; }
+.grow .gn b { display: block; font-weight: 600; }
+.grow .gn span { font-size: 12.5px; color: var(--muted); font-family: var(--font-mono); }
+.grow .gv { text-align: right; font-size: 14px; font-weight: 500; min-width: 0; overflow-wrap: anywhere; }
+.grow .gv small { display: block; font-size: 12.5px; font-weight: 400; color: var(--muted); }
+.grow .gv .pick { display: inline-flex; align-items: center; gap: 7px; }
+.grow.a { background: var(--ca-wash); } .grow.b { background: var(--cb-wash); } .grow.s { background: var(--bg); }
+.grow.wait .gv { color: var(--muted); font-weight: 400; }
+.grow.count .gv { color: var(--ink); font-weight: 400; animation: pulse 1s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: .4; } }
+.coinrow { display: flex; align-items: center; gap: 14px; padding: 10px 12px; border-radius: 9px; background: var(--bg); }
+.coin { width: 46px; height: 46px; border-radius: 50%; flex: none; background: var(--axis); border: 2px solid var(--ink); }
+.coin.spin { animation: flip .36s linear infinite; }
+.coin.a { background: var(--ca); } .coin.b { background: var(--cb); }
+@keyframes flip { 0% { transform: scaleX(1); } 50% { transform: scaleX(.08); } 100% { transform: scaleX(1); } }
+.verdict { display: grid; gap: 4px; }
+.verdict h3 { font-size: 22px; overflow-wrap: anywhere; }
+.rowend { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px 16px; }
+.up { color: var(--good); }
+
+/* Phones: every table fits the screen, so nobody has to scroll sideways mid-game */
+.gshare, .says { display: none; }
+@media (max-width: 560px) {
+  table { font-size: 13px; }
+  th { white-space: normal; padding: 6px 5px; }
+  td { padding: 6px 5px; }
+  .gcell { min-width: 0; gap: 7px; }
+  .gcell .pic { width: 30px; height: 30px; padding: 2px; border-radius: 6px; }
+  .gcell small, #prefTable .share { display: none; }
+  .gshare { display: block; font-size: 12px; color: var(--muted); font-family: var(--font-mono); }
+  .says { display: table-row; }
+  .says td { font-size: 12.5px; line-height: 1.35; color: var(--ink-2); padding-top: 0; }
+  .grp td { border-bottom: 0; }
+  .rank { width: 46px; font-size: 12px; }
+  .btn.big { width: 100%; }
+  .grow { grid-template-columns: auto minmax(0, 1fr); }
+  .grow .gv { grid-column: 1 / -1; text-align: left; }
+  .cand { padding: 10px 11px; }
+  .cand .vt { font-size: 28px; }
+}
+@media (pointer: coarse) {
+  .btn.sm { padding: 7px 12px; font-size: 13.5px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::after { transition: none !important; animation: none !important; }
+}
+</style>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+  <symbol id="g-commuters" viewBox="0 0 100 100"><g stroke="#27231f" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round">
+    <path d="M30 82L20 95M70 82L80 95M25 89H75" fill="none"/>
+    <rect x="23" y="10" width="54" height="72" rx="12" fill="#3f7f9e"/>
+    <rect x="31" y="20" width="38" height="26" rx="4" fill="#d7e5f6"/>
+    <path d="M50 20V46" fill="none"/>
+    <circle cx="35" cy="64" r="5" fill="#f6c343"/><circle cx="65" cy="64" r="5" fill="#f6c343"/>
+    <rect x="44" y="60" width="12" height="8" rx="2" fill="#27231f"/>
+  </g></symbol>
+  <symbol id="g-parents" viewBox="0 0 100 100"><g stroke="#27231f" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round">
+    <path d="M78 46L90 24H96" fill="none" stroke-width="4"/>
+    <path d="M40 68L33 82M62 68L68 82" fill="none"/>
+    <path d="M20 46A32 32 0 0 1 52 14V46Z" fill="#e87ba4"/>
+    <path d="M20 46H78C78 62 66 70 49 70C32 70 20 62 20 46Z" fill="#f7d6e3"/>
+    <circle cx="32" cy="83" r="9" fill="#fbf7ec"/><circle cx="68" cy="83" r="9" fill="#fbf7ec"/>
+  </g></symbol>
+  <symbol id="g-seniors" viewBox="0 0 100 100"><g stroke="#27231f" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round">
+    <path d="M20 94C20 74 33 66 50 66C67 66 80 74 80 94Z" fill="#6aa84f"/>
+    <circle cx="50" cy="40" r="22" fill="#f2c9a1"/>
+    <path d="M28 40C25 19 39 12 50 12C61 12 75 19 72 40C68 29 59 26 50 26C41 26 32 29 28 40Z" fill="#ececec"/>
+    <circle cx="41" cy="43" r="7" fill="#fbf7ec"/><circle cx="59" cy="43" r="7" fill="#fbf7ec"/>
+    <path d="M48 43H52M43 55Q50 59 57 55" fill="none"/>
+  </g></symbol>
+  <symbol id="g-remote" viewBox="0 0 100 100"><g stroke="#27231f" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round">
+    <path d="M34 24Q50 10 66 24M41 31Q50 23 59 31" fill="none"/>
+    <circle cx="50" cy="36" r="2" fill="#27231f"/>
+    <rect x="22" y="42" width="56" height="34" rx="3" fill="#3b3f46"/>
+    <rect x="28" y="48" width="44" height="23" fill="#a8d0ee"/>
+    <path d="M11 76H89L82 87H18Z" fill="#c8ccd2"/>
+  </g></symbol>
+</svg>
+
+<header class="top">
+  <div class="wrap head">
+    <div class="brand">
+      <p class="eyebrow">Game theory · Two-player election</p>
+      <h1>The Tax Election</h1>
+    </div>
+    <div class="gamebar" id="gameBar" hidden>
+      <span>Game code <b id="barCode"></b></span>
+      <span class="online" id="oppOnline" hidden><i></i><span id="oppOnlineText"></span></span>
+      <button type="button" class="btn sm" id="leaveBtn">Leave game</button>
+    </div>
+  </div>
+</header>
+
+<main class="wrap flow">
+  <!-- Start -->
+  <section class="step" id="sStart" aria-labelledby="startH">
+    <div class="step-h"><span class="stepno">Before you begin</span><h2 id="startH">Run for office</h2></div>
+    <p class="lede">You and one opponent are candidates in an election. Each of you promises a tax rate and the spending that goes with it, and four groups of voters choose between you. You will play two games against the same opponent.</p>
+    <div class="voters" id="voterRow"></div>
+    <div class="field" style="max-width:340px">
+      <label for="nameInput">Your name</label>
+      <input type="text" id="nameInput" maxlength="24" autocomplete="off" placeholder="Type your name">
+    </div>
+    <div class="paths">
+      <form class="path" id="createForm">
+        <div class="block"><h3>Start a new game</h3><p class="hint">You get a code to give to your opponent.</p></div>
+        <button type="submit" class="btn primary" id="createBtn" disabled>Start a new game</button>
+      </form>
+      <form class="path" id="joinForm">
+        <div class="block">
+          <h3>Join a game</h3>
+          <div class="field"><label for="joinCode">Game code</label><input type="text" id="joinCode" maxlength="4" autocomplete="off" autocapitalize="characters" autocorrect="off" spellcheck="false" placeholder="Four characters"></div>
+        </div>
+        <button type="submit" class="btn primary" id="joinBtn" disabled>Join this game</button>
+      </form>
+    </div>
+    <p class="msg" id="startMsg" role="alert" hidden></p>
+    <p class="note" id="startNote">Connecting to the game&hellip;</p>
+  </section>
+
+  <!-- Lobby -->
+  <section class="step" id="sLobby" aria-labelledby="lobbyH" hidden>
+    <div class="step-h"><span class="stepno">Waiting room</span><h2 id="lobbyH">Get both candidates ready</h2></div>
+    <div class="block">
+      <p class="lede">Give your opponent this code. They open this page and choose Join a game.</p>
+      <div class="codebox"><span class="code" id="lobbyCode"></span><button type="button" class="btn sm" id="copyBtn">Copy code</button></div>
+    </div>
+    <div class="seats" id="lobbySeats"></div>
+    <div class="lockrow">
+      <button type="button" class="btn primary big" id="readyBtn">I'm ready</button>
+      <p class="status" id="lobbyStatus" aria-live="polite"></p>
+    </div>
+  </section>
+
+  <!-- Choose -->
+  <section class="step" id="sChoose" aria-labelledby="chooseH" hidden>
+    <div class="step-h"><span class="stepno" id="chooseGame"></span><h2 id="chooseH">Choose your tax rate</h2></div>
+    <p class="lede" id="chooseRules"></p>
+    <div class="typebox" id="typeBox" hidden></div>
+    <div class="block">
+      <h3>The electorate</h3>
+      <div class="tablewrap"><table id="prefTable"></table></div>
+      <p class="hint">Each group votes as a block for the candidate whose tax rate it ranks higher. If you both choose the same rate, every group splits evenly and a coin flip decides the winner.</p>
+    </div>
+    <fieldset style="border:0;margin:0;padding:0;min-width:0" class="block">
+      <legend style="padding:0;margin-bottom:10px"><h3>Your tax rate</h3></legend>
+      <div class="taxes" id="taxes"></div>
+    </fieldset>
+    <div class="lockrow">
+      <button type="button" class="btn primary big" id="lockBtn" disabled>Choose a tax rate first</button>
+      <p class="status" id="chooseStatus" aria-live="polite"></p>
+    </div>
+  </section>
+
+  <!-- Election -->
+  <section class="step" id="sElection" aria-labelledby="elH" hidden>
+    <div class="rowend">
+      <div class="step-h"><span class="stepno" id="elGame"></span><h2 id="elH">Election night</h2></div>
+      <button type="button" class="btn sm" id="skipBtn">Skip to the result</button>
+    </div>
+    <div class="cands" id="elCands"></div>
+    <div class="vwrap">
+      <div class="vbar"><div class="vfill a" id="fillA"></div><div class="vfill b" id="fillB"></div><i class="half"></i></div>
+      <p class="vscale">More than 50% of the vote wins</p>
+    </div>
+    <div class="groups" id="elGroups"></div>
+    <div class="coinrow" id="coinRow" hidden><span class="coin" id="coin"></span><span id="coinText" aria-live="polite"></span></div>
+    <div class="verdict" id="verdict" hidden aria-live="polite"><h3 id="verdictH"></h3><p class="lede" id="verdictP"></p></div>
+    <div class="block" id="payBlock" hidden>
+      <h3>Payoffs from this game</h3>
+      <div class="tablewrap"><table id="payTable"></table></div>
+    </div>
+    <div class="lockrow" id="nextRow" hidden>
+      <button type="button" class="btn primary big" id="nextBtn"></button>
+      <p class="status" id="nextStatus" aria-live="polite"></p>
+    </div>
+  </section>
+
+  <!-- Final -->
+  <section class="step" id="sFinal" aria-labelledby="finalH" hidden>
+    <div class="step-h"><span class="stepno">Both games played</span><h2 id="finalH">Final results</h2></div>
+    <div class="tablewrap"><table id="finalTable"></table></div>
+    <p class="lede" id="finalLine"></p>
+    <div class="lockrow"><button type="button" class="btn primary" id="againBtn">Start another game</button></div>
+  </section>
+</main>
+
+<script>
+/* CORE START: game rules and two-player sync. No DOM in this block. */
+const Core = (function () {
+  const TAXES = [
+    { v: 0, label: 'Lowest taxes and spending' },
+    { v: 1, label: 'Basic services' },
+    { v: 2, label: 'Somewhat high taxes and spending' },
+    { v: 3, label: 'Highest taxes and spending' }
+  ];
+  const GROUPS = [
+    { id: 'commuters', name: 'Commuters', share: 20, rank: [0, 1, 2, 3], says: 'Want the lowest taxes and spending.' },
+    { id: 'parents', name: 'Parents', share: 25, rank: [2, 3, 1, 0], says: 'Want somewhat high taxes and spending on resources.' },
+    { id: 'seniors', name: 'Senior citizens', share: 35, rank: [3, 2, 1, 0], says: 'Want the highest tax and high spending. They use the spending and are less exposed to taxes.' },
+    { id: 'remote', name: 'Remote workers', share: 20, rank: [1, 0, 2, 3], says: 'Want basic services.' }
+  ];
+  const STEP = { JOINED: 0, READY: 1, LOCK1: 2, NEXT: 3, LOCK2: 4, DONE: 5 };
+  const other = s => (s === 'a' ? 'b' : 'a');
+  const wait = ms => new Promise(r => setTimeout(r, ms));
+
+  /* ----- Rules ----- */
+  function groupVote(g, ta, tb) {
+    if (ta === tb) return 's';
+    return g.rank.indexOf(ta) < g.rank.indexOf(tb) ? 'a' : 'b';
+  }
+  // Both players' hidden random numbers combine into one shared draw, so neither can predict it.
+  const draw = (seats, game) => seats.a.picks['g' + game].nonce ^ seats.b.picks['g' + game].nonce;
+  // Game 2 types come from Game 1's draw: one Conservative, one Progressive.
+  function types(seats) {
+    const aCons = ((draw(seats, 1) >> 1) & 1) === 0;
+    return { a: aCons ? 'Conservative' : 'Progressive', b: aCons ? 'Progressive' : 'Conservative' };
+  }
+  const ideology = (type, z) => (type === 'Conservative' ? 3 - z : z);
+
+  function outcome(game, seats) {
+    const ta = seats.a.picks['g' + game].tax, tb = seats.b.picks['g' + game].tax;
+    const votes = GROUPS.map(g => ({ group: g, side: groupVote(g, ta, tb) }));
+    const totals = { a: 0, b: 0 };
+    votes.forEach(v => {
+      if (v.side === 's') { totals.a += v.group.share / 2; totals.b += v.group.share / 2; }
+      else totals[v.side] += v.group.share;
+    });
+    const tie = totals.a === totals.b;
+    const winner = tie ? ((draw(seats, game) & 1) === 0 ? 'a' : 'b') : (totals.a > totals.b ? 'a' : 'b');
+    const enacted = winner === 'a' ? ta : tb;
+    const typ = game === 2 ? types(seats) : null;
+    const pay = side => {
+      const office = side === winner ? 1 : 0;
+      if (!typ) return { office, ideology: 0, total: office };
+      const idl = ideology(typ[side], side === 'a' ? ta : tb); // z is the candidate's own chosen rate
+      return { office, ideology: idl, total: office + idl };
+    };
+    return { game, ta, tb, votes, totals, tie, winner, enacted, types: typ, pay: { a: pay('a'), b: pay('b') } };
+  }
+
+  /* ----- Screen for a player, from the two seats alone ----- */
+  function stageOf(me, opp) {
+    if (!me) return 'start';
+    if (!opp || me.step < STEP.READY || opp.step < STEP.READY) return 'lobby';
+    const shown = g => !!(me.picks && me.picks['g' + g] && opp.picks && opp.picks['g' + g]);
+    if (me.step === STEP.READY) return 'choose1';
+    if (me.step === STEP.LOCK1) {
+      if (opp.step < STEP.LOCK1) return 'locked1';
+      return shown(1) ? 'election1' : 'revealing1';
+    }
+    if (me.step === STEP.NEXT) return opp.step < STEP.NEXT ? 'between' : 'choose2';
+    if (me.step === STEP.LOCK2) {
+      if (opp.step < STEP.LOCK2) return 'locked2';
+      return shown(2) ? 'election2' : 'revealing2';
+    }
+    return 'final';
+  }
+
+  /* ----- One player's connection to a game -----
+     Each player writes only to their own seat document, so the two can never overwrite
+     each other. A chosen rate stays private until both seats show they have locked in. */
+  function Session({ db, uid, storage, onChange, onLost }) {
+    let info = null, seats = { a: null, b: null }, unsub = null, lastUpdate = 0;
+    const picks = {}, revealing = {};
+
+    const seatRef = (code, seat) => db.doc('games/' + code + '/seats/' + seat);
+    const seatsCol = code => db.collection('games/' + code + '/seats');
+    const pickRef = g => uid ? db.collection('data/users/' + uid).doc('pick-' + info.code + '-' + info.seat + '-' + g) : null;
+    const me = () => (info ? seats[info.seat] : null);
+    const opp = () => (info ? seats[other(info.seat)] : null);
+    const stage = () => stageOf(me(), opp());
+    const newToken = () => 't' + Math.random().toString(36).slice(2) + Date.now().toString(36);
+
+    async function retry(fn) {
+      try { return await fn(); }
+      catch (e) {
+        if (e && e.code === 'unavailable') { await wait(300 + Math.random() * 500); return fn(); }
+        throw e;
+      }
+    }
+
+    function tick() {
+      const m = /^revealing([12])$/.exec(stage());
+      if (m) reveal(+m[1]);
+      onChange();
+    }
+    function apply(snap, fromPoll) {
+      if (!info) return;
+      const next = { a: null, b: null };
+      snap.docs.forEach(d => {
+        const v = d.data();
+        if (v && v.owner && (d.id === 'a' || d.id === 'b')) next[d.id] = v;
+      });
+      if (fromPoll) ['a', 'b'].forEach(s => {
+        if (seats[s] && (!next[s] || next[s].step < seats[s].step)) next[s] = seats[s]; // a read that lagged behind
+      });
+      if (!next[info.seat]) next[info.seat] = seats[info.seat]; // an early or cached read that lacks our seat
+      const mine = next[info.seat];
+      if (!snap.metadata.fromCache && mine && mine.owner !== info.token) { detach(); onLost('moved'); return; }
+      seats = next; lastUpdate = Date.now();
+      tick();
+    }
+    function detach() {
+      if (unsub) unsub();
+      unsub = null; info = null; seats = { a: null, b: null };
+      storage.clear();
+    }
+    function attach(code, seat, token, name, body) {
+      info = { code, seat, token, name };
+      seats[seat] = body;
+      storage.save(info);
+      // If live updates end for good, poll() keeps the game moving.
+      unsub = seatsCol(code).onSnapshot(s => apply(s, false), () => { unsub = null; });
+    }
+    async function claim(code, seat, token, body) {
+      if (db.claim) return retry(() => db.claim('games/' + code + '/seats/' + seat, body)); // storage with real transactions
+      const ref = seatRef(code, seat);
+      const lease = await retry(() => ref.acquire({ holder: token, ttlMs: 4000 }));
+      if (!lease.acquired) return false;
+      const snap = await retry(() => ref.get());
+      const cur = snap.exists ? snap.data() : null;
+      if (cur && cur.owner) return false;
+      await retry(() => ref.set(body));
+      return true;
+    }
+    async function readSeat(code, seat) {
+      const s = await retry(() => seatRef(code, seat).get());
+      const v = s.exists ? s.data() : null;
+      return v && v.owner ? v : null;
+    }
+    const seatBody = (token, name) => ({ owner: token, name, step: STEP.JOINED, picks: {}, joinedAt: Date.now() });
+
+    async function create(name) {
+      const alphabet = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+      for (let i = 0; i < 6; i++) {
+        let code = '';
+        for (let k = 0; k < 4; k++) code += alphabet[Math.floor(Math.random() * alphabet.length)];
+        if (await readSeat(code, 'a')) continue;
+        const token = newToken(), body = seatBody(token, name);
+        if (await claim(code, 'a', token, body)) {
+          db.doc('games/' + code).set({ createdAt: Date.now() }).catch(() => {});
+          attach(code, 'a', token, name, body);
+          return 'ok';
+        }
+      }
+      return 'busy';
+    }
+    async function join(code, name) {
+      if (!await readSeat(code, 'a')) return 'no_game';
+      for (let i = 0; i < 2; i++) {
+        if (await readSeat(code, 'b')) break;
+        const token = newToken(), body = seatBody(token, name);
+        if (await claim(code, 'b', token, body)) { attach(code, 'b', token, name, body); return 'ok'; }
+        await wait(700); // someone else is mid-join: look again
+      }
+      // Game is full. A player coming back on another device retakes the seat with their name.
+      const same = v => v && v.name.trim().toLowerCase() === name.trim().toLowerCase();
+      for (const s of ['a', 'b']) {
+        const v = await readSeat(code, s);
+        if (same(v)) {
+          const token = newToken();
+          await retry(() => seatRef(code, s).update({ owner: token }));
+          attach(code, s, token, v.name, Object.assign({}, v, { owner: token }));
+          return 'ok';
+        }
+      }
+      return 'full';
+    }
+    async function resume(saved) {
+      const v = await readSeat(saved.code, saved.seat);
+      if (!v || v.owner !== saved.token) { storage.clear(); return false; }
+      attach(saved.code, saved.seat, saved.token, saved.name, v);
+      return true;
+    }
+    function leave() { detach(); onChange(); }
+
+    async function patch(body) {
+      const code = info.code, seat = info.seat;
+      await retry(() => seatRef(code, seat).update(body));
+      if (!info || info.code !== code) return;
+      const cur = seats[seat] || {};
+      seats[seat] = Object.assign({}, cur, body, { picks: Object.assign({}, cur.picks, body.picks) });
+      tick();
+    }
+    const ready = () => patch({ step: STEP.READY });
+    const advance = () => patch({ step: me().step === STEP.LOCK1 ? STEP.NEXT : STEP.DONE });
+
+    async function lock(game, tax) {
+      const pick = { tax, nonce: Math.floor(Math.random() * 1024) };
+      picks[game] = pick;
+      storage.savePick(info, game, pick);
+      const ref = pickRef(game);
+      if (ref) await retry(() => ref.set(pick)).catch(() => {});
+      await patch({ step: game === 1 ? STEP.LOCK1 : STEP.LOCK2 });
+    }
+    async function loadPick(game) {
+      if (picks[game]) return picks[game];
+      const local = storage.loadPick(info, game);
+      if (local) return (picks[game] = local);
+      const ref = pickRef(game);
+      if (!ref) return null;
+      const s = await retry(() => ref.get());
+      return s.exists ? (picks[game] = s.data()) : null;
+    }
+    async function reveal(game) {
+      const m = me();
+      if (revealing[game] || (m.picks && m.picks['g' + game])) return;
+      revealing[game] = true;
+      try {
+        const pick = await loadPick(game);
+        if (pick) await patch({ picks: { ['g' + game]: { tax: pick.tax, nonce: pick.nonce } } });
+        else await patch({ step: game === 1 ? STEP.READY : STEP.NEXT }); // pick lost: choose again
+      } finally { revealing[game] = false; }
+    }
+    // A backstop for networks where live updates fall back to slow refreshes.
+    async function poll() {
+      if (!info || stage() === 'final' || Date.now() - lastUpdate < (db.pollMs || 4000)) return;
+      lastUpdate = Date.now();
+      try { apply(await seatsCol(info.code).get(), true); } catch (e) { /* the next poll tries again */ }
+    }
+
+    return {
+      create, join, resume, leave, ready, advance, lock, poll, loadPick, stage,
+      me, opp, seats: () => seats, info: () => info
+    };
+  }
+
+  return { TAXES, GROUPS, STEP, other, groupVote, outcome, types, ideology, stageOf, Session };
+})();
+/* CORE END */
+
+(function () {
+  const { TAXES, GROUPS } = Core;
+  const $ = id => document.getElementById(id);
+  const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const reduced = () => window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const ORD = ['1st', '2nd', '3rd', '4th'];
+  const use = n => (window.claude && window.claude.use ? window.claude.use(n).catch(() => null) : Promise.resolve(null));
+  const pic = id => `<svg class="pic" viewBox="0 0 100 100" aria-hidden="true"><use href="#g-${id}"/></svg>`;
+
+  /* ---------- Per-tab memory: survives a reload, keeps two tabs as two players ---------- */
+  const KEY = 'tax-election-seat-v1';
+  const pickKey = (i, g) => `tax-election-pick-${i.code}-${i.seat}-${g}`;
+  const ss = {
+    get(k) { try { return JSON.parse(sessionStorage.getItem(k)); } catch (e) { return null; } },
+    set(k, v) { try { sessionStorage.setItem(k, JSON.stringify(v)); } catch (e) {} },
+    del(k) { try { sessionStorage.removeItem(k); } catch (e) {} }
+  };
+  const storage = {
+    save: info => ss.set(KEY, info),
+    clear: () => ss.del(KEY),
+    savePick: (i, g, p) => ss.set(pickKey(i, g), p),
+    loadPick: (i, g) => ss.get(pickKey(i, g))
+  };
+
+  let session = null, ready = false, stageNow = null, busy = false;
+  const selected = {};
+  let builtChoose = 0, builtElection = 0, namedRoom = null, roomApi = null, peersKnown = false, oppHere = false;
+
+  /* ---------- Small helpers ---------- */
+  const name = side => { const v = session.seats()[side]; return v ? v.name : 'Your opponent'; };
+  const oppName = () => { const v = session.opp(); return v ? v.name : 'Your opponent'; };
+  const mySide = () => session.info().seat;
+  const label = side => esc(name(side)) + (side === mySide() ? ' <span class="you">(you)</span>' : '');
+
+  async function act(fn) {
+    if (busy) return;
+    busy = true; render();
+    try { await fn(); }
+    catch (e) { showProblem(e); }
+    finally { busy = false; render(); }
+  }
+  function showProblem(e) {
+    const denied = e && (e.code === 'invalid_argument' || e.code === 'not_granted');
+    const text = denied
+      ? 'You can see this game but cannot play it. Ask your instructor to give you Contributor access.'
+      : 'That did not go through. Check your connection and try again.';
+    const st = stageNow;
+    if (st === 'start' || !st) { $('startMsg').textContent = text; $('startMsg').hidden = false; }
+    else if (st === 'lobby') $('lobbyStatus').textContent = text;
+    else if (/^(choose|locked|revealing)/.test(st)) $('chooseStatus').textContent = text;
+    else $('nextStatus').textContent = text;
+  }
+
+  /* ---------- Start screen ---------- */
+  $('voterRow').innerHTML = GROUPS.map(g => `<div class="voter">${pic(g.id)}<div><b>${g.name}</b><span>${g.share}% of voters</span></div></div>`).join('');
+
+  function refreshStartButtons() {
+    const named = $('nameInput').value.trim().length > 0;
+    $('createBtn').disabled = !ready || !named || busy;
+    $('joinBtn').disabled = !ready || !named || busy || $('joinCode').value.trim().length !== 4;
+  }
+  $('nameInput').addEventListener('input', refreshStartButtons);
+  $('joinCode').addEventListener('input', () => {
+    $('joinCode').value = $('joinCode').value.toUpperCase().replace(/[^A-Z0-9]/g, '');
+    refreshStartButtons();
+  });
+  $('createForm').addEventListener('submit', e => {
+    e.preventDefault();
+    $('startMsg').hidden = true;
+    act(async () => {
+      const r = await session.create($('nameInput').value.trim());
+      if (r !== 'ok') { $('startMsg').textContent = 'We could not start a game just now. Please try again.'; $('startMsg').hidden = false; }
+    });
+  });
+  $('joinForm').addEventListener('submit', e => {
+    e.preventDefault();
+    $('startMsg').hidden = true;
+    act(async () => {
+      const r = await session.join($('joinCode').value.trim(), $('nameInput').value.trim());
+      const text = {
+        no_game: 'No game has that code. Check it with your opponent.',
+        full: 'That game already has two players. If you are one of them, type the name you used.'
+      }[r];
+      if (text) { $('startMsg').textContent = text; $('startMsg').hidden = false; }
+    });
+  });
+
+  /* ---------- Lobby ---------- */
+  function renderLobby() {
+    const seats = session.seats();
+    $('lobbyCode').textContent = session.info().code;
+    $('lobbySeats').innerHTML = ['a', 'b'].map(s => {
+      const v = seats[s];
+      if (!v) return `<div class="seat empty"><span class="who"><i class="dot ${s}"></i>Waiting for a second player</span></div>`;
+      const go = v.step >= Core.STEP.READY;
+      return `<div class="seat"><span class="who"><i class="dot ${s}"></i><span>${label(s)}</span></span><span class="pill${go ? ' go' : ''}">${go ? 'Ready' : 'Not ready'}</span></div>`;
+    }).join('');
+    const iAmReady = session.me().step >= Core.STEP.READY;
+    $('readyBtn').disabled = iAmReady || busy;
+    $('readyBtn').textContent = iAmReady ? 'You are ready' : "I'm ready";
+    $('lobbyStatus').textContent = !session.opp()
+      ? 'The game starts when both candidates are ready.'
+      : iAmReady ? `Waiting for ${oppName()} to get ready.` : `Click when you are ready to start.`;
+  }
+  $('readyBtn').addEventListener('click', () => act(() => session.ready()));
+  $('copyBtn').addEventListener('click', () => {
+    const code = session.info().code, b = $('copyBtn');
+    const done = t => { b.textContent = t; setTimeout(() => { b.textContent = 'Copy code'; }, 1800); };
+    try {
+      navigator.clipboard.writeText(code).then(() => done('Copied'), () => done('Select the code to copy it'));
+    } catch (e) { done('Select the code to copy it'); }
+  });
+
+  /* ---------- Choosing a tax rate ---------- */
+  function buildChoose(game) {
+    builtChoose = game;
+    $('chooseGame').textContent = `Game ${game} of 2`;
+    let typeHtml = '';
+    if (game === 1) {
+      $('chooseRules').textContent = 'Win the election and you score 1. Lose and you score 0. You cannot see your opponent’s choice until you have both locked in.';
+    } else {
+      $('chooseRules').textContent = 'Winning still scores 1, and losing 0. Now each candidate also has a personal ideology and scores for the tax rate they choose, win or lose.';
+      const ty = Core.types(session.seats()), my = ty[mySide()], other = ty[Core.other(mySide())];
+      const row = t => `<tr${t === my ? ' class="mine"' : ''}><td>${t}${t === my ? ' <span class="you">(you)</span>' : ` <span class="you">(${esc(oppName())})</span>`}</td>${[0, 1, 2, 3].map(z => `<td class="c num">${Core.ideology(t, z)}</td>`).join('')}</tr>`;
+      typeHtml = `<h3>You are the ${my}</h3><p>${esc(oppName())} is the ${other}. The Conservative scores 3 − z and the Progressive scores z, where z is the tax rate that candidate chooses.</p>` +
+        `<div class="tablewrap"><table><thead><tr><th>Extra score for choosing tax</th>${[0, 1, 2, 3].map(z => `<th class="c">${z}</th>`).join('')}</tr></thead><tbody>${row('Conservative')}${row('Progressive')}</tbody></table></div>`;
+    }
+    $('typeBox').innerHTML = typeHtml;
+    $('typeBox').hidden = game === 1;
+
+    let t = `<thead><tr><th>Group</th><th class="r share">Share of voters</th>${TAXES.map(x => `<th class="c" data-col="${x.v}">Tax ${x.v}</th>`).join('')}</tr></thead><tbody>`;
+    GROUPS.forEach(g => {
+      t += `<tr class="grp"><td><div class="gcell">${pic(g.id)}<span><b>${g.name}</b><span class="gshare">${g.share}% of voters</span><small>${g.says}</small></span></div></td><td class="r num share">${g.share}%</td>`;
+      TAXES.forEach(x => { const r = g.rank.indexOf(x.v); t += `<td class="c rank r${r + 1}" data-col="${x.v}">${ORD[r]}</td>`; });
+      t += `</tr><tr class="says"><td colspan="5">${g.says}</td></tr>`;
+    });
+    $('prefTable').innerHTML = t + '</tbody>';
+
+    $('taxes').innerHTML = TAXES.map(x => `<label class="tax"><input type="radio" name="tax" id="tax-${x.v}" value="${x.v}"><b>${x.v}</b><small>${x.label}</small></label>`).join('');
+    $('taxes').querySelectorAll('input').forEach(i => i.addEventListener('change', () => { selected[game] = +i.value; renderChoose(game); }));
+  }
+  function renderChoose(game) {
+    const st = stageNow, locked = st !== 'choose' + game;
+    const sel = selected[game];
+    $('taxes').querySelectorAll('input').forEach(i => {
+      i.disabled = locked;
+      i.checked = sel !== undefined && +i.value === sel;
+    });
+    $('prefTable').querySelectorAll('[data-col]').forEach(c => c.classList.toggle('colsel', sel !== undefined && +c.dataset.col === sel));
+    const btn = $('lockBtn');
+    btn.disabled = locked || sel === undefined || busy;
+    btn.textContent = locked ? 'Locked in' : sel === undefined ? 'Choose a tax rate first' : `Ready: lock in tax rate ${sel}`;
+    const lockStep = game === 1 ? Core.STEP.LOCK1 : Core.STEP.LOCK2;
+    const oppLocked = session.opp().step >= lockStep;
+    $('chooseStatus').textContent = locked
+      ? (oppLocked ? 'You have both locked in. Opening the ballot boxes…' : `Waiting for ${oppName()} to lock in.`)
+      : (oppLocked ? `${oppName()} has locked in a tax rate.` : `${oppName()} is still choosing.`);
+  }
+  $('lockBtn').addEventListener('click', () => {
+    const game = builtChoose, tax = selected[game];
+    if (tax === undefined) return;
+    act(() => session.lock(game, tax));
+  });
+
+  /* ---------- Election night ---------- */
+  let elTimers = [], elDone = null, shownVotes = { a: 0, b: 0 };
+  function stopElection() { elTimers.forEach(clearTimeout); elTimers = []; }
+
+  function setBar() {
+    $('fillA').style.width = shownVotes.a + '%';
+    $('fillB').style.width = shownVotes.b + '%';
+    ['a', 'b'].forEach(s => { const e = $('vote-' + s); if (e) e.textContent = (Math.round(shownVotes[s] * 10) / 10) + '%'; });
+  }
+  function revealGroup(o, i) {
+    const v = o.votes[i], row = $('grow-' + i), cell = row.querySelector('.gv');
+    row.className = 'grow ' + v.side;
+    if (v.side === 's') {
+      cell.innerHTML = `Splits evenly<small>Both candidates offer tax ${o.ta}</small>`;
+      shownVotes.a += v.group.share / 2; shownVotes.b += v.group.share / 2;
+    } else {
+      const mine = v.side === 'a' ? o.ta : o.tb, theirs = v.side === 'a' ? o.tb : o.ta;
+      cell.innerHTML = `<span class="pick"><i class="dot ${v.side}"></i><span>Backs ${esc(name(v.side))}</span></span><small>Ranks tax ${mine} above tax ${theirs}</small>`;
+      shownVotes[v.side] += v.group.share;
+    }
+    setBar();
+  }
+  function counting(i) {
+    const row = $('grow-' + i);
+    row.className = 'grow count';
+    row.querySelector('.gv').textContent = 'Counting…';
+  }
+  function showCoin(o, spinning) {
+    $('coinRow').hidden = false;
+    $('coin').className = 'coin' + (spinning ? ' spin' : ' ' + o.winner);
+    $('coinText').textContent = spinning ? 'The vote is tied. Flipping a coin…' : `The coin lands for ${name(o.winner)}.`;
+  }
+  function finishElection(o) {
+    stopElection();
+    shownVotes = { a: o.totals.a, b: o.totals.b };
+    o.votes.forEach((v, i) => {
+      const keep = { a: shownVotes.a, b: shownVotes.b };
+      revealGroup(o, i);
+      shownVotes = keep;
+    });
+    setBar();
+    if (o.tie) showCoin(o, false);
+    $('skipBtn').hidden = true;
+    const iWon = o.winner === mySide(), side = o.winner;
+    $('cand-' + side).classList.add('won');
+    $('verdictH').textContent = iWon ? 'You win the election' : `${name(side)} wins the election`;
+    $('verdictP').textContent = (o.tie ? 'A coin flip settled the tie. ' : `${name(side)} takes ${o.totals[side]}% of the vote. `) + `Tax rate ${o.enacted} is enacted.`;
+    $('verdict').hidden = false;
+
+    const g2 = o.game === 2;
+    let t = `<thead><tr><th>Candidate</th>${g2 ? '<th>Ideology</th>' : ''}<th class="r">Election</th>${g2 ? '<th class="r">Ideology score</th>' : ''}<th class="r">Total</th></tr></thead><tbody>`;
+    ['a', 'b'].forEach(s => {
+      const p = o.pay[s];
+      t += `<tr><td><span style="display:inline-flex;gap:8px;align-items:center"><i class="dot ${s}"></i><span>${label(s)}</span></span></td>${g2 ? `<td>${o.types[s]}</td>` : ''}<td class="r num">${p.office}</td>${g2 ? `<td class="r num">${p.ideology}</td>` : ''}<td class="r num"><b>${p.total}</b></td></tr>`;
+    });
+    $('payTable').innerHTML = t + '</tbody>';
+    $('payBlock').hidden = false;
+    elDone = o.game;
+    renderNext();
+  }
+  function buildElection(game, animate) {
+    stopElection();
+    builtElection = game; elDone = null;
+    const o = Core.outcome(game, session.seats());
+    shownVotes = { a: 0, b: 0 };
+    $('elGame').textContent = `Game ${game} of 2`;
+    $('elCands').innerHTML = ['a', 'b'].map(s => `<div class="cand" id="cand-${s}"><span class="nm"><i class="dot ${s}"></i><span>${label(s)}</span></span>${game === 2 ? `<span class="tg">${o.types[s]}</span>` : ''}<div class="ln"><span class="tx">Tax rate <b>${s === 'a' ? o.ta : o.tb}</b></span><span class="vt num" id="vote-${s}">0%</span></div></div>`).join('');
+    $('elGroups').innerHTML = o.votes.map((v, i) => `<div class="grow wait" id="grow-${i}">${pic(v.group.id)}<div class="gn"><b>${v.group.name}</b><span>${v.group.share}% of voters</span></div><div class="gv">Not yet reported</div></div>`).join('');
+    ['coinRow', 'verdict', 'payBlock', 'nextRow'].forEach(id => { $(id).hidden = true; });
+    $('coin').className = 'coin';
+    $('skipBtn').hidden = false;
+    setBar();
+    $('skipBtn').onclick = () => finishElection(o);
+    if (!animate || reduced()) { finishElection(o); return; }
+    let t = 900;
+    const at = (fn, d) => { t += d; elTimers.push(setTimeout(fn, t)); };
+    o.votes.forEach((v, i) => { at(() => counting(i), 500); at(() => revealGroup(o, i), 1700); });
+    if (o.tie) { at(() => showCoin(o, true), 900); at(() => showCoin(o, false), 2200); }
+    at(() => finishElection(o), 1100);
+  }
+  function renderNext() {
+    if (elDone !== builtElection) return;
+    $('nextRow').hidden = false;
+    const between = stageNow === 'between';
+    $('nextBtn').hidden = between;
+    $('nextBtn').disabled = busy;
+    $('nextBtn').textContent = builtElection === 1 ? 'Continue to Game 2' : 'See the final results';
+    $('nextStatus').textContent = between ? `Waiting for ${oppName()} to continue.` : '';
+  }
+  $('nextBtn').addEventListener('click', () => act(() => session.advance()));
+
+  /* ---------- Final ---------- */
+  function renderFinal() {
+    const seats = session.seats(), me = mySide(), op = Core.other(me);
+    const res = [Core.outcome(1, seats), Core.outcome(2, seats)];
+    const nm = esc(oppName()), tax = (o, s) => (s === 'a' ? o.ta : o.tb);
+    const line = (text, f) => `<tr><td>${text}</td>${res.map(o => `<td class="r">${f(o)}</td>`).join('')}</tr>`;
+    $('finalTable').innerHTML = '<thead><tr><th>Result</th><th class="r">Game 1</th><th class="r">Game 2</th></tr></thead><tbody>' +
+      line('Your tax rate', o => tax(o, me)) +
+      line(`Tax rate of ${nm}`, o => tax(o, op)) +
+      line('Winner', o => (o.winner === me ? 'You' : nm) + (o.tie ? ' <span class="you">(coin flip)</span>' : '')) +
+      line('Tax rate enacted', o => o.enacted) +
+      line('Your payoff', o => `<b>${o.pay[me].total}</b>`) +
+      line(`Payoff of ${nm}`, o => o.pay[op].total) + '</tbody>';
+    const my = res[0].pay[me].total + res[1].pay[me].total, th = res[0].pay[op].total + res[1].pay[op].total;
+    $('finalLine').textContent = `Across both games you scored ${my} and ${oppName()} scored ${th}.`;
+  }
+  $('againBtn').addEventListener('click', () => { session.leave(); });
+
+  /* ---------- Opponent online indicator ---------- */
+  async function joinRoom() {
+    if (!roomApi || !session.info()) return;
+    try {
+      namedRoom = await roomApi.join('tax-' + session.info().code.toLowerCase());
+      namedRoom.presence({ seat: mySide() }).catch(() => {});
+      namedRoom.onPeers(change => {
+        const want = session.info() ? Core.other(mySide()) : null;
+        oppHere = change.peers.some(p => p.presence && p.presence.seat === want);
+        renderOnline();
+      }, () => { namedRoom = null; renderOnline(); });
+      setTimeout(() => { peersKnown = true; renderOnline(); }, 3000); // others keep answering for a moment
+    } catch (e) { namedRoom = null; }
+  }
+  function leaveRoom() {
+    if (namedRoom) namedRoom.leave().catch(() => {});
+    namedRoom = null; peersKnown = false; oppHere = false;
+  }
+  function renderOnline() {
+    const el = $('oppOnline');
+    const show = !!namedRoom && !!session.info() && !!session.opp() && (peersKnown || oppHere);
+    el.hidden = !show;
+    if (!show) return;
+    el.classList.toggle('on', oppHere);
+    $('oppOnlineText').textContent = `${oppName()} is ${oppHere ? 'online' : 'offline'}`;
+  }
+
+  /* ---------- Leaving ---------- */
+  let leaveArmed = null;
+  $('leaveBtn').addEventListener('click', () => {
+    const b = $('leaveBtn');
+    if (!leaveArmed) {
+      b.textContent = 'Click again to leave';
+      leaveArmed = setTimeout(() => { leaveArmed = null; b.textContent = 'Leave game'; }, 3000);
+      return;
+    }
+    clearTimeout(leaveArmed); leaveArmed = null; b.textContent = 'Leave game';
+    session.leave();
+  });
+
+  /* ---------- Render ---------- */
+  const SCREENS = ['sStart', 'sLobby', 'sChoose', 'sElection', 'sFinal'];
+  function screenFor(st) {
+    if (st === 'start') return 'sStart';
+    if (st === 'lobby') return 'sLobby';
+    if (st === 'final') return 'sFinal';
+    if (/^election|^between/.test(st)) return 'sElection';
+    return 'sChoose';
+  }
+  function render() {
+    if (!session) { refreshStartButtons(); return; }
+    const st = session.stage(), changed = st !== stageNow, scr = screenFor(st);
+    const prev = stageNow;
+    stageNow = st;
+    if (changed) {
+      SCREENS.forEach(s => { $(s).hidden = s !== scr; });
+      if (prev !== null && prev !== 'start' && st === 'start') { stopElection(); leaveRoom(); builtChoose = 0; builtElection = 0; Object.keys(selected).forEach(k => delete selected[k]); }
+      if (prev === 'start' || prev === null) { if (st !== 'start') joinRoom(); }
+      if (screenFor(prev || 'start') !== scr) window.scrollTo(0, 0);
+    }
+    const info = session.info();
+    $('gameBar').hidden = !info;
+    if (info) $('barCode').textContent = info.code;
+    renderOnline();
+
+    if (st === 'start') { refreshStartButtons(); return; }
+    if (st === 'lobby') { renderLobby(); return; }
+    if (scr === 'sChoose') {
+      const game = st.endsWith('2') ? 2 : 1;
+      if (builtChoose !== game) buildChoose(game);
+      if (selected[game] === undefined && st !== 'choose' + game) {
+        session.loadPick(game).then(p => { if (p) { selected[game] = p.tax; render(); } }).catch(() => {});
+      }
+      renderChoose(game);
+      return;
+    }
+    if (scr === 'sElection') {
+      const game = st === 'election2' ? 2 : 1;
+      if (builtElection !== game) buildElection(game, st !== 'between');
+      renderNext();
+      return;
+    }
+    if (st === 'final') renderFinal();
+  }
+
+  /* ---------- Boot ---------- */
+  async function boot() {
+    const slow = setTimeout(() => { if (!ready) $('startNote').textContent = 'The game is taking a while to connect. Check you are signed in to claude.ai.'; }, 10000);
+    const [db, user, room] = await Promise.all([use('db'), use('user'), use('room')]);
+    clearTimeout(slow);
+    roomApi = room;
+    if (!db) {
+      $('startNote').textContent = 'This game needs a live connection. Sign in to claude.ai and open the link your instructor shared.';
+      return;
+    }
+    const canWrite = user ? await user.can('data.write') : null;
+    if (canWrite === false) {
+      $('startNote').textContent = 'You can see this page but cannot play. Ask your instructor to give you Contributor access.';
+      return;
+    }
+    const uid = user ? await user.id() : null;
+    session = Core.Session({
+      db, uid, storage,
+      onChange: render,
+      onLost: () => {
+        render();
+        $('startMsg').textContent = 'You rejoined this game on another device, so this page has left it.';
+        $('startMsg').hidden = false;
+      }
+    });
+    ready = true;
+    $('startNote').hidden = true;
+    const saved = ss.get(KEY);
+    if (saved) { try { await session.resume(saved); } catch (e) { /* start fresh */ } }
+    render();
+    setInterval(() => session.poll(), 2000);
+    // A phone that slept catches up as soon as it wakes.
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) session.poll(); });
+  }
+  boot();
+})();
+</script>
+</body></html>

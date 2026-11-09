@@ -928,11 +928,11 @@ const Core = (function () {
     $('prefTable').querySelectorAll('[data-col]').forEach(c => c.classList.toggle('colsel', sel !== undefined && +c.dataset.col === sel));
     const btn = $('lockBtn');
     btn.disabled = locked || sel === undefined || busy;
-    btn.textContent = locked ? 'Locked in' : sel === undefined ? 'Choose a tax rate first' : `Ready: lock in tax rate ${sel}`;
+    btn.textContent = locked ? 'Decided' : sel === undefined ? 'Choose a tax rate first' : `Decide on tax rate ${sel}`;
     const oppLocked = session.opp().step >= Core.lockStep(game);
     $('chooseStatus').textContent = locked
-      ? (oppLocked ? 'You have both locked in. Opening the ballot boxes…' : `Waiting for ${oppName()} to lock in.`)
-      : (oppLocked ? `${oppName()} has locked in a tax rate.` : `${oppName()} is still choosing.`);
+      ? (oppLocked ? 'You have both decided. Opening the ballot boxes…' : `Waiting for ${oppName()} to decide.`)
+      : (oppLocked ? `${oppName()} has decided on a tax rate.` : `${oppName()} is still choosing.`);
   }
   $('lockBtn').addEventListener('click', () => {
     const game = builtChoose, tax = selected[game];

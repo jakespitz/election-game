@@ -1,6 +1,6 @@
 <!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><style>:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}body{margin:0;font:14px system-ui}img{max-width:100%}[hidden]{display:none!important}</style><script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script><script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script><script>// Standalone hosting: gives the game the same small storage interface it has inside Claude,
-// backed by Firestore, so players need only the link. No accounts, so a chosen tax rate
-// stays in the player's own browser until both candidates have locked in.
+// backed by Firestore, so players need only the link. No accounts, so each player's choice
+// stays in their own browser until every player has locked in. Shared by both games.
 (function () {
   const FIREBASE_CONFIG = {"projectId": "elections-game-3c72c"};
   let store = null;
@@ -37,7 +37,7 @@
   }
   window.claude = { use: async name => (name === 'db' ? store : null) };
 })();
-</script></head><body><title>The Tax Election</title>
+</script></head><body><title>Election game</title>
 <meta name="claude:viewport-fit-sides" content="cover">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -150,6 +150,14 @@ input[type="text"] { width: 100%; padding: 9px 11px; border: 1px solid var(--axi
 .path { border: 1px solid var(--line); border-radius: 10px; padding: 14px; display: grid; gap: 10px; align-content: space-between; min-width: 0; }
 .msg { font-size: 14px; color: var(--bad); font-weight: 500; }
 .note { font-size: 14px; color: var(--ink-2); padding: 10px 12px; border-radius: 8px; background: var(--bg); }
+.switch { display: inline-flex; align-items: flex-start; gap: 10px; cursor: pointer; font-size: 14.5px; font-weight: 500; max-width: 100%; }
+.switch input { position: absolute; opacity: 0; pointer-events: none; }
+.switch .track { position: relative; width: 38px; height: 22px; flex: none; border-radius: 99px; background: var(--axis); transition: background .15s; margin-top: 1px; }
+.switch .track::after { content: ''; position: absolute; top: 3px; left: 3px; width: 16px; height: 16px; border-radius: 50%; background: var(--surface); transition: transform .15s; }
+.switch input:checked + .track { background: var(--accent); }
+.switch input:checked + .track::after { transform: translateX(16px); }
+.switch input:focus-visible + .track { outline: 2px solid var(--accent); outline-offset: 2px; }
+.switch small { display: block; font-weight: 400; font-size: 13px; color: var(--muted); }
 
 /* Lobby */
 .codebox { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; }
@@ -303,7 +311,7 @@ th.colsel { color: var(--accent-ink); box-shadow: none; }
   <div class="wrap head">
     <div class="brand">
       <p class="eyebrow">Game theory · Two-player election</p>
-      <h1>The Tax Election</h1>
+      <h1>Election game</h1>
     </div>
     <div class="gamebar" id="gameBar" hidden>
       <span>Game code <b id="barCode"></b></span>
@@ -323,9 +331,10 @@ th.colsel { color: var(--accent-ink); box-shadow: none; }
       <label for="nameInput">Your name</label>
       <input type="text" id="nameInput" maxlength="24" autocomplete="off" placeholder="Type your name">
     </div>
+    <label class="switch"><input type="checkbox" id="soloToggle"><span class="track" aria-hidden="true"></span><span>Play against the computer<small>For trying the game on your own. The computer always plays its equilibrium strategy.</small></span></label>
     <div class="paths">
       <form class="path" id="createForm">
-        <div class="block"><h3>Start a new game</h3><p class="hint">You get a code to give to your opponent.</p></div>
+        <div class="block"><h3>Start a new game</h3><p class="hint" id="createHint">You get a code to give to your opponent.</p></div>
         <button type="submit" class="btn primary" id="createBtn" disabled>Start a new game</button>
       </form>
       <form class="path" id="joinForm">
@@ -344,7 +353,7 @@ th.colsel { color: var(--accent-ink); box-shadow: none; }
   <section class="step" id="sLobby" aria-labelledby="lobbyH" hidden>
     <div class="step-h"><span class="stepno">Waiting room</span><h2 id="lobbyH">Get both candidates ready</h2></div>
     <div class="block">
-      <p class="lede">Give your opponent this code. They open this page and choose Join a game.</p>
+      <p class="lede" id="lobbyLede">Give your opponent this code. They open this page and choose Join a game.</p>
       <div class="codebox"><span class="code" id="lobbyCode"></span><button type="button" class="btn sm" id="copyBtn">Copy code</button></div>
     </div>
     <div class="seats" id="lobbySeats"></div>
@@ -451,9 +460,9 @@ const Core = (function () {
   // Divided by 3, so the most ideology can add equals the prize for winning.
   const ideology = (type, z) => (type === 'Conservative' ? 3 - z : z) / 3;
 
-  function outcome(game, seats) {
-    const ta = seats.a.picks['g' + game].tax, tb = seats.b.picks['g' + game].tax, rules = GAMES[game];
-    // Whole-number weights (share x turnout) keep ties exact.
+  // The vote when the candidates offer rates ta and tb. Whole-number weights (share x turnout) keep ties exact.
+  function tally(game, ta, tb) {
+    const rules = GAMES[game];
     const weight = g => rules.shares[g.id] * (rules.turnout ? g.turnout : 100);
     const cast = GROUPS.reduce((s, g) => s + weight(g), 0);
     const votes = GROUPS.map(g => ({ group: g, share: rules.shares[g.id], side: groupVote(g, ta, tb), pct: 100 * weight(g) / cast }));
@@ -463,7 +472,11 @@ const Core = (function () {
       else totals[v.side] += weight(v.group);
     });
     const pct = { a: 100 * totals.a / cast, b: 100 * totals.b / cast };
-    const tie = totals.a === totals.b;
+    return { rules, votes, totals, pct, tie: totals.a === totals.b };
+  }
+  function outcome(game, seats) {
+    const ta = seats.a.picks['g' + game].tax, tb = seats.b.picks['g' + game].tax;
+    const { rules, votes, totals, pct, tie } = tally(game, ta, tb);
     const winner = tie ? ((draw(seats, game) & 1) === 0 ? 'a' : 'b') : (totals.a > totals.b ? 'a' : 'b');
     const enacted = winner === 'a' ? ta : tb;
     const typ = rules.ideology ? types(seats) : null;
@@ -474,6 +487,33 @@ const Core = (function () {
       return { office, ideology: idl, total: office + idl };
     };
     return { game, rules, ta, tb, votes, totals, pct, tie, winner, enacted, types: typ, pay: { a: pay('a'), b: pay('b') } };
+  }
+
+  /* ----- Solving a game, for the computer player ----- */
+  // Expected payoffs before any coin is flipped: a tie is worth half the prize.
+  function expected(game, ta, tb, typ) {
+    const t = tally(game, ta, tb);
+    const office = t.tie ? { a: 0.5, b: 0.5 } : t.totals.a > t.totals.b ? { a: 1, b: 0 } : { a: 0, b: 1 };
+    return { a: office.a + (typ ? ideology(typ.a, ta) : 0), b: office.b + (typ ? ideology(typ.b, tb) : 0) };
+  }
+  const RATES = TAXES.map(x => x.v), EPS = 1e-9;
+  // Pure-strategy Nash equilibria of one game, as [rate a, rate b] pairs.
+  function equilibria(game, typ) {
+    const u = (x, y) => expected(game, x, y, typ), out = [];
+    RATES.forEach(x => RATES.forEach(y => {
+      const p = u(x, y);
+      if (RATES.every(x2 => u(x2, y).a <= p.a + EPS) && RATES.every(y2 => u(x, y2).b <= p.b + EPS)) out.push([x, y]);
+    }));
+    return out;
+  }
+  // The computer's rate: its part of an equilibrium, preferring one that is never worse than any alternative.
+  function optimal(game, side, typ) {
+    const mine = (x, y) => (side === 'a' ? expected(game, x, y, typ).a : expected(game, y, x, typ).b);
+    const worst = x => Math.min(...RATES.map(y => mine(x, y)));
+    const cands = [...new Set(equilibria(game, typ).map(e => e[side === 'a' ? 0 : 1]))];
+    if (!cands.length) return RATES.reduce((b, x) => (worst(x) > worst(b) + EPS ? x : b)); // no pure equilibrium: the safest rate
+    const dominant = cands.filter(x => RATES.every(x2 => RATES.every(y => mine(x, y) >= mine(x2, y) - EPS)));
+    return dominant.length ? dominant[0] : cands[0];
   }
 
   /* ----- Screen for a player, from the two seats alone ----- */
@@ -660,7 +700,7 @@ const Core = (function () {
     };
   }
 
-  return { TAXES, GROUPS, GAMES, NGAMES, STEP, lockStep, other, groupVote, outcome, types, ideology, stageOf, Session };
+  return { TAXES, GROUPS, GAMES, NGAMES, STEP, lockStep, other, groupVote, tally, outcome, types, ideology, expected, equilibria, optimal, stageOf, Session };
 })();
 /* CORE END */
 
@@ -706,14 +746,15 @@ const Core = (function () {
   async function act(fn) {
     if (busy) return;
     busy = true; render();
+    let err = null;
     try { await fn(); }
-    catch (e) { showProblem(e); }
-    finally { busy = false; render(); }
+    catch (e) { err = e; }
+    finally { busy = false; render(); if (err) showProblem(err); } // after the redraw, so the message stays up
   }
   function showProblem(e) {
-    const denied = e && (e.code === 'invalid_argument' || e.code === 'not_granted');
+    const denied = e && (e.code === 'invalid_argument' || e.code === 'not_granted' || e.code === 'permission-denied');
     const text = denied
-      ? 'You can see this game but cannot play it. Ask your instructor to give you Contributor access.'
+      ? 'The game server refused that move. Ask your instructor to check the game is set up.'
       : 'That did not go through. Check your connection and try again.';
     const st = stageNow;
     if (st === 'start' || !st) { $('startMsg').textContent = text; $('startMsg').hidden = false; }
@@ -722,7 +763,62 @@ const Core = (function () {
     else $('nextStatus').textContent = text;
   }
 
+  /* ---------- Computer players, for trying the game alone ----------
+     Each one takes a real seat through the same database, so a practice game tests the live setup too. */
+  const BOTS_KEY = KEY + '-bots';
+  let gameDb = null, bots = [], solo = false;
+  function makeBot() {
+    const mem = {}, b = { s: null, busy: false };
+    const storage = {
+      save: info => ss.set(BOTS_KEY, (ss.get(BOTS_KEY) || []).filter(x => x.seat !== info.seat).concat([info])),
+      clear: () => {},
+      savePick: (i, g, p) => { mem[g] = p; },
+      loadPick: (i, g) => mem[g] || null
+    };
+    const choose = g => Core.optimal(g, b.s.info().seat, Core.GAMES[g].ideology ? Core.types(b.s.seats()) : null);
+    const drive = () => {
+      if (b.busy || !b.s.info()) return;
+      const st = b.s.stage();
+      const fn = st === 'lobby' && b.s.me().step < Core.STEP.READY ? () => b.s.ready()
+        : /^choose\d+$/.test(st) ? () => b.s.lock(+st.slice(6), choose(+st.slice(6)))
+        : /^election\d+$/.test(st) ? () => b.s.advance()
+        : null;
+      if (!fn) return;
+      b.busy = true;
+      setTimeout(() => { Promise.resolve().then(fn).catch(() => {}).finally(() => { b.busy = false; drive(); }); }, 600 + Math.random() * 800);
+    };
+    b.s = Core.Session({ db: gameDb, uid: null, storage, onChange: drive, onLost: () => {} });
+    return b;
+  }
+  async function addBots(names) {
+    solo = true;
+    for (const n of names) {
+      const b = makeBot();
+      if (await b.s.join(session.info().code, n) === 'ok') bots.push(b);
+    }
+  }
+  async function resumeBots() {
+    for (const info of ss.get(BOTS_KEY) || []) {
+      if (!session.info() || info.code !== session.info().code) continue;
+      const b = makeBot();
+      if (await b.s.resume(info).catch(() => false)) bots.push(b);
+    }
+    solo = bots.length > 0;
+    if (!solo) ss.del(BOTS_KEY);
+  }
+  function stopBots() {
+    bots.forEach(b => b.s.leave());
+    bots = []; solo = false;
+    ss.del(BOTS_KEY);
+  }
+
   /* ---------- Start screen ---------- */
+  $('soloToggle').addEventListener('change', () => {
+    const solo = $('soloToggle').checked;
+    $('joinForm').hidden = solo;
+    $('createBtn').textContent = solo ? 'Start a game against the computer' : 'Start a new game';
+    $('createHint').textContent = solo ? 'The computer joins as your opponent.' : 'You get a code to give to your opponent.';
+  });
   $('voterRow').innerHTML = GROUPS.map(g => `<div class="voter">${pic(g.id)}<div><b>${g.name}</b><span>Favours tax ${g.rank[0]}</span></div></div>`).join('');
 
   function refreshStartButtons() {
@@ -740,7 +836,8 @@ const Core = (function () {
     $('startMsg').hidden = true;
     act(async () => {
       const r = await session.create($('nameInput').value.trim());
-      if (r !== 'ok') { $('startMsg').textContent = 'We could not start a game just now. Please try again.'; $('startMsg').hidden = false; }
+      if (r !== 'ok') { $('startMsg').textContent = 'We could not start a game just now. Please try again.'; $('startMsg').hidden = false; return; }
+      if ($('soloToggle').checked) await addBots(['Computer']);
     });
   });
   $('joinForm').addEventListener('submit', e => {
@@ -760,6 +857,7 @@ const Core = (function () {
   function renderLobby() {
     const seats = session.seats();
     $('lobbyCode').textContent = session.info().code;
+    $('lobbyLede').textContent = solo ?'The computer has joined as your opponent.' : 'Give your opponent this code. They open this page and choose Join a game.';
     $('lobbySeats').innerHTML = ['a', 'b'].map(s => {
       const v = seats[s];
       if (!v) return `<div class="seat empty"><span class="who"><i class="dot ${s}"></i>Waiting for a second player</span></div>`;
@@ -972,7 +1070,7 @@ const Core = (function () {
   }
   function renderOnline() {
     const el = $('oppOnline');
-    const show = !!namedRoom && !!session.info() && !!session.opp() && (peersKnown || oppHere);
+    const show = !solo && !!namedRoom && !!session.info() && !!session.opp() && (peersKnown || oppHere);
     el.hidden = !show;
     if (!show) return;
     el.classList.toggle('on', oppHere);
@@ -1008,7 +1106,7 @@ const Core = (function () {
     stageNow = st;
     if (changed) {
       SCREENS.forEach(s => { $(s).hidden = s !== scr; });
-      if (prev !== null && prev !== 'start' && st === 'start') { stopElection(); leaveRoom(); builtChoose = 0; builtElection = 0; Object.keys(selected).forEach(k => delete selected[k]); }
+      if (prev !== null && prev !== 'start' && st === 'start') { stopElection(); leaveRoom(); stopBots(); builtChoose = 0; builtElection = 0; Object.keys(selected).forEach(k => delete selected[k]); }
       if (prev === 'start' || prev === null) { if (st !== 'start') joinRoom(); }
       if (screenFor(prev || 'start') !== scr) window.scrollTo(0, 0);
     }
@@ -1053,6 +1151,7 @@ const Core = (function () {
       return;
     }
     const uid = user ? await user.id() : null;
+    gameDb = db;
     session = Core.Session({
       db, uid, storage,
       onChange: render,
@@ -1066,10 +1165,12 @@ const Core = (function () {
     $('startNote').hidden = true;
     const saved = ss.get(KEY);
     if (saved) { try { await session.resume(saved); } catch (e) { /* start fresh */ } }
+    if (session.info()) await resumeBots(); else ss.del(BOTS_KEY);
     render();
-    setInterval(() => session.poll(), 2000);
+    const pollAll = () => { session.poll(); bots.forEach(b => b.s.poll()); };
+    setInterval(pollAll, 2000);
     // A phone that slept catches up as soon as it wakes.
-    document.addEventListener('visibilitychange', () => { if (!document.hidden) session.poll(); });
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) pollAll(); });
   }
   boot();
 })();

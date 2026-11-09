@@ -2,7 +2,7 @@
 // backed by Firestore, so players need only the link. No accounts, so a chosen tax rate
 // stays in the player's own browser until both candidates have locked in.
 (function () {
-  const FIREBASE_CONFIG = {"apiKey": "AIzaSyCp0RV5jpeI-BihlzKKki2Iuxi5VZGalSQ", "authDomain": "elections-game-3c72c.firebaseapp.com", "projectId": "elections-game-3c72c", "storageBucket": "elections-game-3c72c.firebasestorage.app", "messagingSenderId": "6678517702", "appId": "1:6678517702:web:d8e8cd42190cc77e3604c7"};
+  const FIREBASE_CONFIG = {"projectId": "elections-game-3c72c"};
   let store = null;
   if (FIREBASE_CONFIG && window.firebase) {
     firebase.initializeApp(FIREBASE_CONFIG);
@@ -317,7 +317,7 @@ th.colsel { color: var(--accent-ink); box-shadow: none; }
   <!-- Start -->
   <section class="step" id="sStart" aria-labelledby="startH">
     <div class="step-h"><span class="stepno">Before you begin</span><h2 id="startH">Run for office</h2></div>
-    <p class="lede">You and one opponent are candidates in an election. Each of you promises a tax rate and the spending that goes with it, and four groups of voters choose between you. You will play two games against the same opponent.</p>
+    <p class="lede">You and one opponent are candidates in an election. Each of you promises a tax rate and the spending that goes with it, and four blocs of voters choose between you. You will play three games against the same opponent.</p>
     <div class="voters" id="voterRow"></div>
     <div class="field" style="max-width:340px">
       <label for="nameInput">Your name</label>
@@ -357,12 +357,11 @@ th.colsel { color: var(--accent-ink); box-shadow: none; }
   <!-- Choose -->
   <section class="step" id="sChoose" aria-labelledby="chooseH" hidden>
     <div class="step-h"><span class="stepno" id="chooseGame"></span><h2 id="chooseH">Choose your tax rate</h2></div>
-    <p class="lede" id="chooseRules"></p>
+    <div class="lede block" id="chooseRules"></div>
     <div class="typebox" id="typeBox" hidden></div>
     <div class="block">
       <h3>The electorate</h3>
       <div class="tablewrap"><table id="prefTable"></table></div>
-      <p class="hint">Each group votes as a block for the candidate whose tax rate it ranks higher. If you both choose the same rate, every group splits evenly and a coin flip decides the winner.</p>
     </div>
     <fieldset style="border:0;margin:0;padding:0;min-width:0" class="block">
       <legend style="padding:0;margin-bottom:10px"><h3>Your tax rate</h3></legend>
@@ -383,7 +382,7 @@ th.colsel { color: var(--accent-ink); box-shadow: none; }
     <div class="cands" id="elCands"></div>
     <div class="vwrap">
       <div class="vbar"><div class="vfill a" id="fillA"></div><div class="vfill b" id="fillB"></div><i class="half"></i></div>
-      <p class="vscale">More than 50% of the vote wins</p>
+      <p class="vscale">More than 50% of the votes cast wins</p>
     </div>
     <div class="groups" id="elGroups"></div>
     <div class="coinrow" id="coinRow" hidden><span class="coin" id="coin"></span><span id="coinText" aria-live="polite"></span></div>
@@ -400,7 +399,7 @@ th.colsel { color: var(--accent-ink); box-shadow: none; }
 
   <!-- Final -->
   <section class="step" id="sFinal" aria-labelledby="finalH" hidden>
-    <div class="step-h"><span class="stepno">Both games played</span><h2 id="finalH">Final results</h2></div>
+    <div class="step-h"><span class="stepno">All three games played</span><h2 id="finalH">Final results</h2></div>
     <div class="tablewrap"><table id="finalTable"></table></div>
     <p class="lede" id="finalLine"></p>
     <div class="lockrow"><button type="button" class="btn primary" id="againBtn">Start another game</button></div>
@@ -411,18 +410,29 @@ th.colsel { color: var(--accent-ink); box-shadow: none; }
 /* CORE START: game rules and two-player sync. No DOM in this block. */
 const Core = (function () {
   const TAXES = [
-    { v: 0, label: 'Lowest taxes and spending' },
-    { v: 1, label: 'Basic services' },
-    { v: 2, label: 'Somewhat high taxes and spending' },
-    { v: 3, label: 'Highest taxes and spending' }
+    { v: 0, label: 'Almost no tax, with only minimal spending on roads and defence.' },
+    { v: 1, label: 'Low to moderate tax, with spending on essential services like hospitals and parks.' },
+    { v: 2, label: 'Fairly high tax, with spending on schools, health services and public facilities like pools and libraries.' },
+    { v: 3, label: 'High tax, with full public health care and state pensions.' }
   ];
+  // Voting blocs. `turnout` is the propensity to vote, in percent, used from Game 2 on.
   const GROUPS = [
-    { id: 'commuters', name: 'Commuters', share: 20, rank: [0, 1, 2, 3], says: 'Want the lowest taxes and spending.' },
-    { id: 'parents', name: 'Parents', share: 25, rank: [2, 3, 1, 0], says: 'Want somewhat high taxes and spending on resources.' },
-    { id: 'seniors', name: 'Senior citizens', share: 35, rank: [3, 2, 1, 0], says: 'Want the highest tax and high spending. They use the spending and are less exposed to taxes.' },
-    { id: 'remote', name: 'Remote workers', share: 20, rank: [1, 0, 2, 3], says: 'Want basic services.' }
+    { id: 'commuters', name: 'Commuters', turnout: 70, rank: [0, 1, 2, 3], says: 'Want the lowest taxes and spending.' },
+    { id: 'parents', name: 'Parents', turnout: 80, rank: [2, 1, 0, 3], says: 'Want somewhat high taxes and spending on resources.' },
+    { id: 'seniors', name: 'Senior citizens', turnout: 100, rank: [3, 2, 1, 0], says: 'Want the highest tax and high spending. They use the spending and are less exposed to taxes.' },
+    { id: 'remote', name: 'Remote workers', turnout: 50, rank: [1, 0, 2, 3], says: 'Want basic services.' }
   ];
-  const STEP = { JOINED: 0, READY: 1, LOCK1: 2, NEXT: 3, LOCK2: 4, DONE: 5 };
+  // Each bloc's share of the electorate, in percent, differs by game.
+  const EVEN = { commuters: 25, parents: 25, seniors: 25, remote: 25 };
+  const GAMES = {
+    1: { shares: { commuters: 30, parents: 30, seniors: 25, remote: 15 }, turnout: false, ideology: false },
+    2: { shares: EVEN, turnout: true, ideology: false },
+    3: { shares: EVEN, turnout: true, ideology: true }
+  };
+  const NGAMES = 3;
+  // A seat's progress: 1 ready, then for game g: 2g - 1 choosing, 2g locked in. 2 * NGAMES + 1 means finished.
+  const STEP = { JOINED: 0, READY: 1, DONE: 2 * NGAMES + 1 };
+  const lockStep = g => 2 * g;
   const other = s => (s === 'a' ? 'b' : 'a');
   const wait = ms => new Promise(r => setTimeout(r, ms));
 
@@ -433,50 +443,52 @@ const Core = (function () {
   }
   // Both players' hidden random numbers combine into one shared draw, so neither can predict it.
   const draw = (seats, game) => seats.a.picks['g' + game].nonce ^ seats.b.picks['g' + game].nonce;
-  // Game 2 types come from Game 1's draw: one Conservative, one Progressive.
+  // Game 3 types come from Game 1's draw: one Conservative, one Progressive.
   function types(seats) {
     const aCons = ((draw(seats, 1) >> 1) & 1) === 0;
     return { a: aCons ? 'Conservative' : 'Progressive', b: aCons ? 'Progressive' : 'Conservative' };
   }
-  const ideology = (type, z) => (type === 'Conservative' ? 3 - z : z);
+  // Divided by 3, so the most ideology can add equals the prize for winning.
+  const ideology = (type, z) => (type === 'Conservative' ? 3 - z : z) / 3;
 
   function outcome(game, seats) {
-    const ta = seats.a.picks['g' + game].tax, tb = seats.b.picks['g' + game].tax;
-    const votes = GROUPS.map(g => ({ group: g, side: groupVote(g, ta, tb) }));
+    const ta = seats.a.picks['g' + game].tax, tb = seats.b.picks['g' + game].tax, rules = GAMES[game];
+    // Whole-number weights (share x turnout) keep ties exact.
+    const weight = g => rules.shares[g.id] * (rules.turnout ? g.turnout : 100);
+    const cast = GROUPS.reduce((s, g) => s + weight(g), 0);
+    const votes = GROUPS.map(g => ({ group: g, share: rules.shares[g.id], side: groupVote(g, ta, tb), pct: 100 * weight(g) / cast }));
     const totals = { a: 0, b: 0 };
     votes.forEach(v => {
-      if (v.side === 's') { totals.a += v.group.share / 2; totals.b += v.group.share / 2; }
-      else totals[v.side] += v.group.share;
+      if (v.side === 's') { totals.a += weight(v.group) / 2; totals.b += weight(v.group) / 2; }
+      else totals[v.side] += weight(v.group);
     });
+    const pct = { a: 100 * totals.a / cast, b: 100 * totals.b / cast };
     const tie = totals.a === totals.b;
     const winner = tie ? ((draw(seats, game) & 1) === 0 ? 'a' : 'b') : (totals.a > totals.b ? 'a' : 'b');
     const enacted = winner === 'a' ? ta : tb;
-    const typ = game === 2 ? types(seats) : null;
+    const typ = rules.ideology ? types(seats) : null;
     const pay = side => {
       const office = side === winner ? 1 : 0;
       if (!typ) return { office, ideology: 0, total: office };
       const idl = ideology(typ[side], side === 'a' ? ta : tb); // z is the candidate's own chosen rate
       return { office, ideology: idl, total: office + idl };
     };
-    return { game, ta, tb, votes, totals, tie, winner, enacted, types: typ, pay: { a: pay('a'), b: pay('b') } };
+    return { game, rules, ta, tb, votes, totals, pct, tie, winner, enacted, types: typ, pay: { a: pay('a'), b: pay('b') } };
   }
 
   /* ----- Screen for a player, from the two seats alone ----- */
   function stageOf(me, opp) {
     if (!me) return 'start';
     if (!opp || me.step < STEP.READY || opp.step < STEP.READY) return 'lobby';
+    if (me.step >= STEP.DONE) return 'final';
     const shown = g => !!(me.picks && me.picks['g' + g] && opp.picks && opp.picks['g' + g]);
-    if (me.step === STEP.READY) return 'choose1';
-    if (me.step === STEP.LOCK1) {
-      if (opp.step < STEP.LOCK1) return 'locked1';
-      return shown(1) ? 'election1' : 'revealing1';
+    const g = Math.ceil(me.step / 2);
+    if (me.step % 2 === 1) { // choosing in game g, once the opponent has also moved on
+      if (g > 1 && opp.step < me.step) return 'between' + (g - 1);
+      return 'choose' + g;
     }
-    if (me.step === STEP.NEXT) return opp.step < STEP.NEXT ? 'between' : 'choose2';
-    if (me.step === STEP.LOCK2) {
-      if (opp.step < STEP.LOCK2) return 'locked2';
-      return shown(2) ? 'election2' : 'revealing2';
-    }
-    return 'final';
+    if (opp.step < me.step) return 'locked' + g;
+    return shown(g) ? 'election' + g : 'revealing' + g;
   }
 
   /* ----- One player's connection to a game -----
@@ -503,7 +515,7 @@ const Core = (function () {
     }
 
     function tick() {
-      const m = /^revealing([12])$/.exec(stage());
+      const m = /^revealing(\d)$/.exec(stage());
       if (m) reveal(+m[1]);
       onChange();
     }
@@ -606,7 +618,7 @@ const Core = (function () {
       tick();
     }
     const ready = () => patch({ step: STEP.READY });
-    const advance = () => patch({ step: me().step === STEP.LOCK1 ? STEP.NEXT : STEP.DONE });
+    const advance = () => patch({ step: me().step + 1 });
 
     async function lock(game, tax) {
       const pick = { tax, nonce: Math.floor(Math.random() * 1024) };
@@ -614,7 +626,7 @@ const Core = (function () {
       storage.savePick(info, game, pick);
       const ref = pickRef(game);
       if (ref) await retry(() => ref.set(pick)).catch(() => {});
-      await patch({ step: game === 1 ? STEP.LOCK1 : STEP.LOCK2 });
+      await patch({ step: lockStep(game) });
     }
     async function loadPick(game) {
       if (picks[game]) return picks[game];
@@ -632,7 +644,7 @@ const Core = (function () {
       try {
         const pick = await loadPick(game);
         if (pick) await patch({ picks: { ['g' + game]: { tax: pick.tax, nonce: pick.nonce } } });
-        else await patch({ step: game === 1 ? STEP.READY : STEP.NEXT }); // pick lost: choose again
+        else await patch({ step: lockStep(game) - 1 }); // pick lost: choose again
       } finally { revealing[game] = false; }
     }
     // A backstop for networks where live updates fall back to slow refreshes.
@@ -648,7 +660,7 @@ const Core = (function () {
     };
   }
 
-  return { TAXES, GROUPS, STEP, other, groupVote, outcome, types, ideology, stageOf, Session };
+  return { TAXES, GROUPS, GAMES, NGAMES, STEP, lockStep, other, groupVote, outcome, types, ideology, stageOf, Session };
 })();
 /* CORE END */
 
@@ -658,6 +670,11 @@ const Core = (function () {
   const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const reduced = () => window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   const ORD = ['1st', '2nd', '3rd', '4th'];
+  // Scores come in thirds once ideology counts: 1⅔ rather than 1.6666666666666665.
+  const thirds = x => {
+    const n = Math.round(x * 3), whole = Math.floor(n / 3), part = ['', '⅓', '⅔'][n % 3];
+    return whole === 0 && part ? part : whole + part;
+  };
   const use = n => (window.claude && window.claude.use ? window.claude.use(n).catch(() => null) : Promise.resolve(null));
   const pic = id => `<svg class="pic" viewBox="0 0 100 100" aria-hidden="true"><use href="#g-${id}"/></svg>`;
 
@@ -706,7 +723,7 @@ const Core = (function () {
   }
 
   /* ---------- Start screen ---------- */
-  $('voterRow').innerHTML = GROUPS.map(g => `<div class="voter">${pic(g.id)}<div><b>${g.name}</b><span>${g.share}% of voters</span></div></div>`).join('');
+  $('voterRow').innerHTML = GROUPS.map(g => `<div class="voter">${pic(g.id)}<div><b>${g.name}</b><span>Favours tax ${g.rank[0]}</span></div></div>`).join('');
 
   function refreshStartButtons() {
     const named = $('nameInput').value.trim().length > 0;
@@ -768,23 +785,33 @@ const Core = (function () {
   /* ---------- Choosing a tax rate ---------- */
   function buildChoose(game) {
     builtChoose = game;
-    $('chooseGame').textContent = `Game ${game} of 2`;
+    $('chooseGame').textContent = `Game ${game} of ${Core.NGAMES}`;
+    const rules = Core.GAMES[game];
+    const extra = {
+      1: 'In this game everyone votes, so each bloc’s share of the electorate is its share of the vote.',
+      2: 'In this game not everyone votes. Each bloc turns out at its propensity to vote, shown in the table, so blocs that vote more count for more.',
+      3: 'Shares and turnout work as in Game 2. Winning the election scores 1 and losing scores 0. Now each candidate also has a personal ideology and scores up to 1 more for the tax rate they choose, win or lose.'
+    }[game];
+    $('chooseRules').innerHTML =
+      '<p>This is a simultaneous game where each player chooses their policy platform to win the support of voters in an election.</p>' +
+      '<p>A policy platform is a tax rate and accompanying spending package. Voters will vote for whoever’s policy platform is closest to their preferences. If two policy platforms are equally close then each voter decides by coin flip who to vote for, meaning the vote from that bloc of the electorate is split equally.</p>' +
+      `<p>${extra}</p>`;
     let typeHtml = '';
-    if (game === 1) {
-      $('chooseRules').textContent = 'Win the election and you score 1. Lose and you score 0. You cannot see your opponent’s choice until you have both locked in.';
-    } else {
-      $('chooseRules').textContent = 'Winning still scores 1, and losing 0. Now each candidate also has a personal ideology and scores for the tax rate they choose, win or lose.';
+    if (rules.ideology) {
       const ty = Core.types(session.seats()), my = ty[mySide()], other = ty[Core.other(mySide())];
-      const row = t => `<tr${t === my ? ' class="mine"' : ''}><td>${t}${t === my ? ' <span class="you">(you)</span>' : ` <span class="you">(${esc(oppName())})</span>`}</td>${[0, 1, 2, 3].map(z => `<td class="c num">${Core.ideology(t, z)}</td>`).join('')}</tr>`;
-      typeHtml = `<h3>You are the ${my}</h3><p>${esc(oppName())} is the ${other}. The Conservative scores 3 − z and the Progressive scores z, where z is the tax rate that candidate chooses.</p>` +
+      const row = t => `<tr${t === my ? ' class="mine"' : ''}><td>${t}${t === my ? ' <span class="you">(you)</span>' : ` <span class="you">(${esc(oppName())})</span>`}</td>${[0, 1, 2, 3].map(z => `<td class="c num">${thirds(Core.ideology(t, z))}</td>`).join('')}</tr>`;
+      typeHtml = `<h3>You are the ${my}</h3><p>${esc(oppName())} is the ${other}. The Conservative scores (3 − z) ÷ 3 and the Progressive scores z ÷ 3, where z is the tax rate that candidate chooses.</p>` +
         `<div class="tablewrap"><table><thead><tr><th>Extra score for choosing tax</th>${[0, 1, 2, 3].map(z => `<th class="c">${z}</th>`).join('')}</tr></thead><tbody>${row('Conservative')}${row('Progressive')}</tbody></table></div>`;
     }
     $('typeBox').innerHTML = typeHtml;
-    $('typeBox').hidden = game === 1;
+    $('typeBox').hidden = !rules.ideology;
 
-    let t = `<thead><tr><th>Group</th><th class="r share">Share of voters</th>${TAXES.map(x => `<th class="c" data-col="${x.v}">Tax ${x.v}</th>`).join('')}</tr></thead><tbody>`;
+    const tcol = rules.turnout;
+    let t = `<thead><tr><th>Bloc</th><th class="r share">Share of electorate</th>${tcol ? '<th class="r share">Propensity to vote</th>' : ''}${TAXES.map(x => `<th class="c" data-col="${x.v}">Tax ${x.v}</th>`).join('')}</tr></thead><tbody>`;
     GROUPS.forEach(g => {
-      t += `<tr class="grp"><td><div class="gcell">${pic(g.id)}<span><b>${g.name}</b><span class="gshare">${g.share}% of voters</span><small>${g.says}</small></span></div></td><td class="r num share">${g.share}%</td>`;
+      const share = rules.shares[g.id];
+      const sub = `${share}% of electorate` + (tcol ? ` · ${g.turnout}% vote` : '');
+      t += `<tr class="grp"><td><div class="gcell">${pic(g.id)}<span><b>${g.name}</b><span class="gshare">${sub}</span><small>${g.says}</small></span></div></td><td class="r num share">${share}%</td>${tcol ? `<td class="r num share">${g.turnout}%</td>` : ''}`;
       TAXES.forEach(x => { const r = g.rank.indexOf(x.v); t += `<td class="c rank r${r + 1}" data-col="${x.v}">${ORD[r]}</td>`; });
       t += `</tr><tr class="says"><td colspan="5">${g.says}</td></tr>`;
     });
@@ -804,8 +831,7 @@ const Core = (function () {
     const btn = $('lockBtn');
     btn.disabled = locked || sel === undefined || busy;
     btn.textContent = locked ? 'Locked in' : sel === undefined ? 'Choose a tax rate first' : `Ready: lock in tax rate ${sel}`;
-    const lockStep = game === 1 ? Core.STEP.LOCK1 : Core.STEP.LOCK2;
-    const oppLocked = session.opp().step >= lockStep;
+    const oppLocked = session.opp().step >= Core.lockStep(game);
     $('chooseStatus').textContent = locked
       ? (oppLocked ? 'You have both locked in. Opening the ballot boxes…' : `Waiting for ${oppName()} to lock in.`)
       : (oppLocked ? `${oppName()} has locked in a tax rate.` : `${oppName()} is still choosing.`);
@@ -830,11 +856,11 @@ const Core = (function () {
     row.className = 'grow ' + v.side;
     if (v.side === 's') {
       cell.innerHTML = `Splits evenly<small>Both candidates offer tax ${o.ta}</small>`;
-      shownVotes.a += v.group.share / 2; shownVotes.b += v.group.share / 2;
+      shownVotes.a += v.pct / 2; shownVotes.b += v.pct / 2;
     } else {
       const mine = v.side === 'a' ? o.ta : o.tb, theirs = v.side === 'a' ? o.tb : o.ta;
       cell.innerHTML = `<span class="pick"><i class="dot ${v.side}"></i><span>Backs ${esc(name(v.side))}</span></span><small>Ranks tax ${mine} above tax ${theirs}</small>`;
-      shownVotes[v.side] += v.group.share;
+      shownVotes[v.side] += v.pct;
     }
     setBar();
   }
@@ -850,7 +876,7 @@ const Core = (function () {
   }
   function finishElection(o) {
     stopElection();
-    shownVotes = { a: o.totals.a, b: o.totals.b };
+    shownVotes = { a: o.pct.a, b: o.pct.b };
     o.votes.forEach((v, i) => {
       const keep = { a: shownVotes.a, b: shownVotes.b };
       revealGroup(o, i);
@@ -862,14 +888,14 @@ const Core = (function () {
     const iWon = o.winner === mySide(), side = o.winner;
     $('cand-' + side).classList.add('won');
     $('verdictH').textContent = iWon ? 'You win the election' : `${name(side)} wins the election`;
-    $('verdictP').textContent = (o.tie ? 'A coin flip settled the tie. ' : `${name(side)} takes ${o.totals[side]}% of the vote. `) + `Tax rate ${o.enacted} is enacted.`;
+    $('verdictP').textContent = (o.tie ? 'The vote was tied, and a coin flip settled it. ' : `${name(side)} takes ${Math.round(o.pct[side] * 10) / 10}% of the votes cast. `) + `Tax rate ${o.enacted} is enacted.`;
     $('verdict').hidden = false;
 
-    const g2 = o.game === 2;
-    let t = `<thead><tr><th>Candidate</th>${g2 ? '<th>Ideology</th>' : ''}<th class="r">Election</th>${g2 ? '<th class="r">Ideology score</th>' : ''}<th class="r">Total</th></tr></thead><tbody>`;
+    const idl = !!o.rules.ideology;
+    let t = `<thead><tr><th>Candidate</th>${idl ? '<th>Ideology</th>' : ''}<th class="r">Election</th>${idl ? '<th class="r">Ideology score</th>' : ''}<th class="r">Total</th></tr></thead><tbody>`;
     ['a', 'b'].forEach(s => {
       const p = o.pay[s];
-      t += `<tr><td><span style="display:inline-flex;gap:8px;align-items:center"><i class="dot ${s}"></i><span>${label(s)}</span></span></td>${g2 ? `<td>${o.types[s]}</td>` : ''}<td class="r num">${p.office}</td>${g2 ? `<td class="r num">${p.ideology}</td>` : ''}<td class="r num"><b>${p.total}</b></td></tr>`;
+      t += `<tr><td><span style="display:inline-flex;gap:8px;align-items:center"><i class="dot ${s}"></i><span>${label(s)}</span></span></td>${idl ? `<td>${o.types[s]}</td>` : ''}<td class="r num">${p.office}</td>${idl ? `<td class="r num">${thirds(p.ideology)}</td>` : ''}<td class="r num"><b>${thirds(p.total)}</b></td></tr>`;
     });
     $('payTable').innerHTML = t + '</tbody>';
     $('payBlock').hidden = false;
@@ -881,9 +907,9 @@ const Core = (function () {
     builtElection = game; elDone = null;
     const o = Core.outcome(game, session.seats());
     shownVotes = { a: 0, b: 0 };
-    $('elGame').textContent = `Game ${game} of 2`;
-    $('elCands').innerHTML = ['a', 'b'].map(s => `<div class="cand" id="cand-${s}"><span class="nm"><i class="dot ${s}"></i><span>${label(s)}</span></span>${game === 2 ? `<span class="tg">${o.types[s]}</span>` : ''}<div class="ln"><span class="tx">Tax rate <b>${s === 'a' ? o.ta : o.tb}</b></span><span class="vt num" id="vote-${s}">0%</span></div></div>`).join('');
-    $('elGroups').innerHTML = o.votes.map((v, i) => `<div class="grow wait" id="grow-${i}">${pic(v.group.id)}<div class="gn"><b>${v.group.name}</b><span>${v.group.share}% of voters</span></div><div class="gv">Not yet reported</div></div>`).join('');
+    $('elGame').textContent = `Game ${game} of ${Core.NGAMES}`;
+    $('elCands').innerHTML = ['a', 'b'].map(s => `<div class="cand" id="cand-${s}"><span class="nm"><i class="dot ${s}"></i><span>${label(s)}</span></span>${o.rules.ideology ? `<span class="tg">${o.types[s]}</span>` : ''}<div class="ln"><span class="tx">Tax rate <b>${s === 'a' ? o.ta : o.tb}</b></span><span class="vt num" id="vote-${s}">0%</span></div></div>`).join('');
+    $('elGroups').innerHTML = o.votes.map((v, i) => `<div class="grow wait" id="grow-${i}">${pic(v.group.id)}<div class="gn"><b>${v.group.name}</b><span>${v.share}% of the electorate${o.rules.turnout ? ` · ${v.group.turnout}% vote` : ''}</span></div><div class="gv">Not yet reported</div></div>`).join('');
     ['coinRow', 'verdict', 'payBlock', 'nextRow'].forEach(id => { $(id).hidden = true; });
     $('coin').className = 'coin';
     $('skipBtn').hidden = false;
@@ -899,10 +925,10 @@ const Core = (function () {
   function renderNext() {
     if (elDone !== builtElection) return;
     $('nextRow').hidden = false;
-    const between = stageNow === 'between';
+    const between = stageNow.startsWith('between');
     $('nextBtn').hidden = between;
     $('nextBtn').disabled = busy;
-    $('nextBtn').textContent = builtElection === 1 ? 'Continue to Game 2' : 'See the final results';
+    $('nextBtn').textContent = builtElection < Core.NGAMES ? `Continue to Game ${builtElection + 1}` : 'See the final results';
     $('nextStatus').textContent = between ? `Waiting for ${oppName()} to continue.` : '';
   }
   $('nextBtn').addEventListener('click', () => act(() => session.advance()));
@@ -910,18 +936,19 @@ const Core = (function () {
   /* ---------- Final ---------- */
   function renderFinal() {
     const seats = session.seats(), me = mySide(), op = Core.other(me);
-    const res = [Core.outcome(1, seats), Core.outcome(2, seats)];
+    const res = [];
+    for (let g = 1; g <= Core.NGAMES; g++) res.push(Core.outcome(g, seats));
     const nm = esc(oppName()), tax = (o, s) => (s === 'a' ? o.ta : o.tb);
     const line = (text, f) => `<tr><td>${text}</td>${res.map(o => `<td class="r">${f(o)}</td>`).join('')}</tr>`;
-    $('finalTable').innerHTML = '<thead><tr><th>Result</th><th class="r">Game 1</th><th class="r">Game 2</th></tr></thead><tbody>' +
+    $('finalTable').innerHTML = `<thead><tr><th>Result</th>${res.map(o => `<th class="r">Game ${o.game}</th>`).join('')}</tr></thead><tbody>` +
       line('Your tax rate', o => tax(o, me)) +
       line(`Tax rate of ${nm}`, o => tax(o, op)) +
       line('Winner', o => (o.winner === me ? 'You' : nm) + (o.tie ? ' <span class="you">(coin flip)</span>' : '')) +
       line('Tax rate enacted', o => o.enacted) +
-      line('Your payoff', o => `<b>${o.pay[me].total}</b>`) +
-      line(`Payoff of ${nm}`, o => o.pay[op].total) + '</tbody>';
-    const my = res[0].pay[me].total + res[1].pay[me].total, th = res[0].pay[op].total + res[1].pay[op].total;
-    $('finalLine').textContent = `Across both games you scored ${my} and ${oppName()} scored ${th}.`;
+      line('Your payoff', o => `<b>${thirds(o.pay[me].total)}</b>`) +
+      line(`Payoff of ${nm}`, o => thirds(o.pay[op].total)) + '</tbody>';
+    const my = res.reduce((s, o) => s + o.pay[me].total, 0), th = res.reduce((s, o) => s + o.pay[op].total, 0);
+    $('finalLine').textContent = `Across the ${res.length} games you scored ${thirds(my)} and ${oppName()} scored ${thirds(th)}.`;
   }
   $('againBtn').addEventListener('click', () => { session.leave(); });
 
@@ -993,7 +1020,7 @@ const Core = (function () {
     if (st === 'start') { refreshStartButtons(); return; }
     if (st === 'lobby') { renderLobby(); return; }
     if (scr === 'sChoose') {
-      const game = st.endsWith('2') ? 2 : 1;
+      const game = +st.replace(/\D/g, '');
       if (builtChoose !== game) buildChoose(game);
       if (selected[game] === undefined && st !== 'choose' + game) {
         session.loadPick(game).then(p => { if (p) { selected[game] = p.tax; render(); } }).catch(() => {});
@@ -1002,8 +1029,8 @@ const Core = (function () {
       return;
     }
     if (scr === 'sElection') {
-      const game = st === 'election2' ? 2 : 1;
-      if (builtElection !== game) buildElection(game, st !== 'between');
+      const game = +st.replace(/\D/g, '');
+      if (builtElection !== game) buildElection(game, !st.startsWith('between'));
       renderNext();
       return;
     }
